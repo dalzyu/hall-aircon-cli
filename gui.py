@@ -14,6 +14,7 @@ Features:
     fanstep/flap, the controls are greyed out and labelled unsupported
 """
 
+import queue
 import threading
 import time
 import webbrowser
@@ -25,7 +26,7 @@ import hall_aircon_api as api
 
 POLL_SECONDS = 10
 HISTORY_EVERY = 6          # fetch history/inbox every 6th poll (~1 min)
-PROBE_DEADLINE = 60        # seconds to wait for a capability probe answer
+PROBE_DEADLINE = 40        # seconds to wait for a capability probe answer
 DEFAULT_RATE = 0.0065      # SGD per minute fallback
 
 GREEN = "#2E7D32"
@@ -54,6 +55,7 @@ class App(ctk.CTk):
         self.usage_cache, self.topup_cache, self.inbox_cache = [], [], []
         self.probing = False
         self.probe_deadline = 0.0
+        self._ui_queue = queue.Queue()  # thread -> main-thread callback queue
 
         self._build_login()
         self._build_main()
@@ -62,6 +64,16 @@ class App(ctk.CTk):
         if api.get_token():
             self.load_main()
         self._schedule_poll()
+        self.after(100, self._drain_queue)
+
+    def _drain_queue(self):
+        """Run UI callbacks posted from worker threads (thread-safe)."""
+        try:
+            while True:
+                self._ui_queue.get_nowait()()
+        except queue.Empty:
+            pass
+        self.after(100, self._drain_queue)
 
     # ------------------------------------------------------------------ UI
     def _build_login(self):
@@ -166,7 +178,10 @@ class App(ctk.CTk):
         self.swing_hint.pack(pady=(0, 12))
 
     def _build_history_tab(self, tab):
-        ctk.CTkLabel(tab, text="Usage sessions", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(10, 4))
+        head = ctk.CTkFrame(tab, fg_color="transparent")
+        head.pack(fill="x", padx=10, pady=(10, 0))
+        ctk.CTkLabel(head, text="Usage sessions", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
+        ctk.CTkButton(head, text="Refresh", width=80, height=26, command=self._refresh_lists).pack(side="right")
         self.usage_summary = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color="#9e9e9e")
         self.usage_summary.pack(pady=(0, 4))
         self.usage_box = ctk.CTkScrollableFrame(tab, height=180)
@@ -177,6 +192,10 @@ class App(ctk.CTk):
         self.topup_box.pack(fill="x", padx=10, pady=(0, 10))
 
     def _build_inbox_tab(self, tab):
+        head = ctk.CTkFrame(tab, fg_color="transparent")
+        head.pack(fill="x", padx=10, pady=(10, 0))
+        ctk.CTkLabel(head, text="Notifications", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
+        ctk.CTkButton(head, text="Refresh", width=80, height=26, command=self._refresh_lists).pack(side="right")
         self.inbox_box = ctk.CTkScrollableFrame(tab)
         self.inbox_box.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -206,12 +225,12 @@ class App(ctk.CTk):
             try:
                 result = fn()
             except api.ApiError as e:
-                self.after(0, lambda: on_err(str(e)) if on_err else None)
+                self._ui_queue.put(lambda: on_err(str(e)) if on_err else None)
                 return
             except Exception as e:  # noqa: BLE001
-                self.after(0, lambda: on_err(str(e)) if on_err else None)
+                self._ui_queue.put(lambda: on_err(str(e)) if on_err else None)
                 return
-            self.after(0, lambda: on_ok(result) if on_ok else None)
+            self._ui_queue.put(lambda: on_ok(result) if on_ok else None)
         threading.Thread(target=worker, daemon=True).start()
 
     # -------------------------------------------------------------- login
@@ -295,9 +314,14 @@ class App(ctk.CTk):
         token = api.get_token()
         if not token:
             return
+
+        def on_ok(data):
+            self._render(data)
+            if initial:
+                self._refresh_lists()
         self._run(
             lambda: self._fetch_all(token),
-            on_ok=lambda data: self._render(data),
+            on_ok=on_ok,
             on_err=lambda e: self._render_error(e, initial),
         )
 
@@ -476,17 +500,19 @@ class App(ctk.CTk):
                 self.footer.configure(text=e)
             self._run(lambda: api.api_request("POST", "v2/ac/control", token=token, body=body), on_ok=ok, on_err=err)
 
-        # deadline expired → mark still-null capabilities as unsupported
+        # deadline expired → mark still-null capabilities as unsupported,
+        # but only if the unit stayed on for the whole probe window
         if self.probing and time.time() > self.probe_deadline:
             self.probing = False
-            if "fan" not in caps:
-                caps["fan"] = False
-            if "swing" not in caps:
-                caps["swing"] = False
-            self._set_cap(code, "fan", caps["fan"])
-            self._set_cap(code, "swing", caps["swing"])
-            self._apply_cap_ui(code, caps)
-            self.footer.configure(text=f"Updated {datetime.now().strftime('%H:%M:%S')}")
+            if a.get("power") and a.get("comm_stat"):
+                if "fan" not in caps:
+                    caps["fan"] = False
+                if "swing" not in caps:
+                    caps["swing"] = False
+                self._set_cap(code, "fan", caps["fan"])
+                self._set_cap(code, "swing", caps["swing"])
+                self._apply_cap_ui(code, caps)
+                self.footer.configure(text=f"Updated {datetime.now().strftime('%H:%M:%S')}")
 
     def _apply_cap_ui(self, code, caps):
         fan_known = "fan" in caps
@@ -626,19 +652,29 @@ class App(ctk.CTk):
 
     # -------------------------------------------------------------- polling
     def _schedule_poll(self):
-        self.after(POLL_SECONDS * 1000, self._poll_tick)
+        self.after(self._poll_interval_ms(), self._poll_tick)
+
+    def _poll_interval_ms(self):
+        # poll twice as fast while a capability probe is running
+        return 5000 if self.probing else POLL_SECONDS * 1000
 
     def _poll_tick(self):
         self.tick += 1
         if self.main_frame.winfo_ismapped() and api.get_token():
             self.refresh()
             if self.tick % HISTORY_EVERY == 0:
-                self._run(
-                    lambda: self._fetch_lists(api.get_token()),
-                    on_ok=lambda t: self._cache_lists(*t),
-                    on_err=lambda _e: None,
-                )
+                self._refresh_lists()
         self._schedule_poll()
+
+    def _refresh_lists(self):
+        token = api.get_token()
+        if not token:
+            return
+        self._run(
+            lambda: self._fetch_lists(token),
+            on_ok=lambda t: self._cache_lists(*t),
+            on_err=lambda _e: None,
+        )
 
     def _cache_lists(self, usage, topups, inbox):
         self.usage_cache = usage.get("data") or []
