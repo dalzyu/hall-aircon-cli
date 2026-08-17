@@ -1,21 +1,34 @@
 # hall-aircon-cli
 
-Unofficial command-line client for the **Hall Aircon** service. It talks to the
-same public HTTPS API that the official mobile app uses, with **your own**
-account. No third-party dependencies — Python 3.8+ standard library only.
+Unofficial desktop and command-line clients for the **Hall Aircon** service.
+They talk to the same public HTTPS API that the official mobile app uses, with
+**your own** account. The CLI has no third-party dependencies; the GUI needs
+one (customtkinter).
 
 > Not affiliated with Daikin or NTU. Use only with your own account and your
 > own aircon unit.
 
-## Install
+## Desktop GUI (Windows / macOS / Linux)
 
 ```bash
-git clone https://github.com/<you>/hall-aircon-cli.git
-cd hall-aircon-cli
-# no dependencies to install
+pip install customtkinter
+python gui.py
 ```
 
-## Quick start
+The GUI shows a big on/off button, temperature controls, fan speed and swing,
+your balance and room temperature, and refreshes automatically every 10 s.
+Student login: it opens the NTU sign-in page in your browser, you paste the
+redirect URL back, done.
+
+To ship a single-file executable for other students:
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --windowed --name HallAircon gui.py
+# binary lands in dist/ (build on each OS you want to support)
+```
+
+## Command-line tool
 
 ```bash
 # Log in once (stores the session token in ~/.config/hall-aircon/config.json, mode 0600)
@@ -23,7 +36,6 @@ cd hall-aircon-cli
 
 # For non-student (email + password) accounts:
 ./hall_aircon.py login --email you@example.com --password ...
-
 # Then:
 ./hall_aircon.py status          # balance + aircon state
 ./hall_aircon.py on              # turn on
@@ -66,6 +78,10 @@ permissions. It is never sent anywhere except to the official API.
   charge is deducted from your wallet balance. That's normal billing behaviour.
 - Commands are accepted by the cloud immediately, but the physical unit may
   take ~10 seconds to reflect a change (`status` shows the last reported state).
+- **Fan speed and swing are hardware-dependent**: the API accepts `fan` and
+  `swing` commands, but some units don't support them and will never report
+  `fanstep`/`flap` (they stay `None` in `status`). If your unit behaves this
+  way, those features aren't available on your model.
 - The official API enforces rate limits; please don't script rapid toggling.
 
 ## License

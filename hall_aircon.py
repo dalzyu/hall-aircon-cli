@@ -7,51 +7,10 @@ account credentials. No third-party dependencies (Python 3.8+, stdlib only).
 
 import argparse
 import getpass
-import json
-import os
 import sys
 import time
-import urllib.error
-import urllib.request
 
-BASE_URL = os.environ.get("HALL_AIRCON_API", "https://apintu-prod.daikinpayu.com").rstrip("/")
-SAML_PREFIX = "https://cmsntu-prod.daikinpayu.com/adfs/saml/redirect/"
-CONFIG_PATH = os.path.join(
-    os.environ.get("HALL_AIRCON_CONFIG_DIR", os.path.expanduser("~/.config/hall-aircon")),
-    "config.json",
-)
-# Same User-Agent the official app sends; the API host's edge blocks generic
-# Python clients otherwise.
-USER_AGENT = os.environ.get("HALL_AIRCON_USER_AGENT", "Dart/3.0 (dart:io)")
-
-FAN_LEVELS = ("A", "L", "LM", "M", "MH", "H")
-
-
-# --------------------------------------------------------------------------
-# HTTP helpers
-# --------------------------------------------------------------------------
-
-def api_request(method: str, path: str, token: str | None = None, body: dict | None = None) -> dict:
-    url = f"{BASE_URL}/{path.lstrip('/')}"
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("User-Agent", USER_AGENT)
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = resp.read().decode("utf-8")
-            return json.loads(raw) if raw.strip() else {}
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", errors="replace")
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return {"meta": {"status": e.code, "message": raw.strip() or e.reason}}
-    except urllib.error.URLError as e:
-        return {"meta": {"status": 0, "message": f"network error: {e.reason}"}}
+import hall_aircon_api as api
 
 
 def die(message: str) -> None:
@@ -59,30 +18,8 @@ def die(message: str) -> None:
     sys.exit(1)
 
 
-# --------------------------------------------------------------------------
-# Credential handling
-# --------------------------------------------------------------------------
-
-def load_config() -> dict:
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_config(config: dict) -> None:
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-    try:
-        os.chmod(CONFIG_PATH, 0o600)
-    except OSError:
-        pass  # e.g. Windows
-
-
 def resolve_token(args) -> str:
-    token = args.token or os.environ.get("HALL_AIRCON_TOKEN") or load_config().get("token")
+    token = args.token or api.get_token()
     if not token:
         die("no token found — run 'hall_aircon.py login' or pass --token")
     return token
@@ -92,50 +29,33 @@ def resolve_token(args) -> str:
 # Commands
 # --------------------------------------------------------------------------
 
+def _redirect_handler(login_url: str) -> str:
+    print("Sign in with your NTU account in a browser:")
+    print(f"  {login_url}")
+    print()
+    print("After sign-in you will be redirected to a URL starting with:")
+    print(f"  {api.SAML_PREFIX}")
+    return input("Paste that full redirect URL here: ")
+
+
 def cmd_login(args) -> None:
     email = args.email or input("Email: ").strip()
-    fcm = args.fcm_token or ""
-    password = args.password
-
-    r = api_request("POST", "auth/ad/verify", body={"email": email})
-    status = r.get("meta", {}).get("status")
-    if status == 404:
-        die("email is not registered")
-    if status != 200:
-        die(f"verify failed: {r.get('meta', {}).get('message')}")
-
-    if r.get("data", {}).get("ad_status"):
-        # Student account: NTU SSO via browser, then exchange the redirect hash.
-        login_url = r["data"].get("login_url") or f"{SAML_PREFIX}"
-        print("Sign in with your NTU account in a browser:")
-        print(f"  {login_url}")
-        print()
-        print("After sign-in you will be redirected to a URL starting with:")
-        print(f"  {SAML_PREFIX}")
-        final_url = input("Paste that full redirect URL here: ").strip()
-        if not final_url.startswith(SAML_PREFIX):
-            die("the pasted URL does not match the expected redirect prefix")
-        body = {"hash": final_url[len(SAML_PREFIX):], "fcm_token": fcm}
-        r = api_request("POST", "auth/ad/callback", body=body)
-    else:
-        # Non-student account: email + password.
-        if not password:
-            password = getpass.getpass("Password: ")
-        r = api_request(
-            "POST", "auth/login",
-            body={"email": email, "password": password, "fcm_token": fcm},
+    try:
+        api.login(
+            email, password=args.password, fcm_token=args.fcm_token or "",
+            get_redirect=None if args.password else _redirect_handler,
         )
-
-    token = (r.get("data") or {}).get("token")
-    if not token:
-        die(f"login failed: {r.get('meta', {}).get('message') or r}")
-    save_config({**load_config(), "token": token, "fcm_token": fcm or None})
-    print(f"logged in — token stored in {CONFIG_PATH} (mode 0600)")
+    except api.ApiError as e:
+        die(str(e))
+    print(f"logged in — token stored in {api.CONFIG_PATH} (mode 0600)")
 
 
 def cmd_status(args) -> None:
-    r = api_request("GET", "me", token=resolve_token(args))
-    if (r.get("meta") or {}).get("status") != 200:
+    try:
+        r = api.api_request("GET", "me", token=resolve_token(args))
+    except api.ApiError as e:
+        die(str(e))
+    if (r.get("meta") or {}).get("status", 200) != 200:
         die(f"status failed: {r.get('meta', {}).get('message')}")
     d = r["data"]
     a = d.get("aircon") or {}
@@ -146,8 +66,8 @@ def cmd_status(args) -> None:
         print(f"mode    : {a.get('mode')}")
         print(f"setpoint: {a.get('setpoint')} C")
         print(f"current : {a.get('current_temperature')} C")
-        print(f"fan     : {a.get('fanstep')}")
-        print(f"swing   : {a.get('flap')}")
+        print(f"fan     : {a.get('fanstep') or 'unsupported'}")
+        print(f"swing   : {a.get('flap') or 'unsupported'}")
         print(f"online  : {'yes' if a.get('comm_stat') else 'no'}")
         if a.get("maintenance_mode"):
             print("NOTE    : unit is in maintenance mode")
@@ -155,9 +75,12 @@ def cmd_status(args) -> None:
 
 def cmd_control(key: str, value: str, args) -> None:
     token = resolve_token(args)
-    r = api_request("POST", "v2/ac/control", token=token, body={key: value})
+    try:
+        r = api.api_request("POST", "v2/ac/control", token=token, body={key: value})
+    except api.ApiError as e:
+        die(str(e))
     meta = r.get("meta") or {}
-    if meta.get("status") != 200:
+    if meta.get("status", 200) != 200:
         die(f"control failed: {meta.get('message')}")
     print(meta.get("message", "ok"))
     time.sleep(3)
@@ -181,8 +104,8 @@ def cmd_temp(args) -> None:
 
 def cmd_fan(args) -> None:
     level = args.level.upper()
-    if level not in FAN_LEVELS:
-        die(f"fan level must be one of {', '.join(FAN_LEVELS)}")
+    if level not in api.FAN_LEVELS:
+        die(f"fan level must be one of {', '.join(api.FAN_LEVELS)}")
     cmd_control("fanstep", level, args)
 
 
@@ -202,54 +125,48 @@ def _print_rows(rows: list, columns: list[tuple[str, str]]) -> None:
         print()
 
 
-def cmd_usage(args) -> None:
-    r = api_request(
-        "GET", f"usage/history?limit={args.limit}&offset={args.offset}",
-        token=resolve_token(args),
-    )
+def _list_request(args, path: str, what: str, columns) -> None:
+    try:
+        r = api.api_request("GET", path, token=resolve_token(args))
+    except api.ApiError as e:
+        die(str(e))
     if (r.get("meta") or {}).get("status", 200) != 200:
-        die(f"usage failed: {r.get('meta', {}).get('message')}")
+        die(f"{what} failed: {r.get('meta', {}).get('message')}")
     meta = r["meta"]
-    print(f"{meta.get('rowCount', 0)} session(s)")
-    _print_rows(
-        r.get("data") or [],
+    print(f"{meta.get('rowCount', 0)} record(s)")
+    _print_rows(r.get("data") or [], columns)
+
+
+def cmd_usage(args) -> None:
+    _list_request(
+        args, f"usage/history?limit={args.limit}&offset={args.offset}", "usage",
         [("start", "starttime"), ("end", "endtime"), ("minutes", "duration"),
          ("cost", "amount"), ("rate/min", "rate"), ("aircon", "aircon_name")],
     )
 
 
 def cmd_topups(args) -> None:
-    r = api_request("GET", f"topup/history?limit={args.limit}", token=resolve_token(args))
-    if (r.get("meta") or {}).get("status", 200) != 200:
-        die(f"topups failed: {r.get('meta', {}).get('message')}")
-    meta = r["meta"]
-    print(f"{meta.get('rowCount', 0)} top-up(s)")
-    _print_rows(
-        r.get("data") or [],
+    _list_request(
+        args, f"topup/history?limit={args.limit}", "topups",
         [("date", "created_on"), ("type", "type"), ("amount", "amount"),
          ("status", "status"), ("ref", "txn_id")],
     )
 
 
 def cmd_inbox(args) -> None:
-    r = api_request("GET", f"notification?limit={args.limit}", token=resolve_token(args))
-    if (r.get("meta") or {}).get("status", 200) != 200:
-        die(f"inbox failed: {r.get('meta', {}).get('message')}")
-    meta = r["meta"]
-    print(f"{meta.get('rowCount', 0)} message(s)")
-    _print_rows(
-        r.get("data") or [],
+    _list_request(
+        args, f"notification?limit={args.limit}", "inbox",
         [("sent", "send_on"), ("title", "title"), ("message", "message")],
     )
 
 
 def cmd_logout(args) -> None:
-    r = api_request("POST", "auth/logout", token=resolve_token(args))
     try:
-        os.remove(CONFIG_PATH)
-    except OSError:
-        pass
-    print((r.get("meta") or {}).get("message", "logged out"))
+        api.api_request("POST", "auth/logout", token=resolve_token(args))
+    except api.ApiError as e:
+        die(str(e))
+    api.clear_token()
+    print("logged out")
 
 
 # --------------------------------------------------------------------------
