@@ -10,10 +10,35 @@ one (customtkinter).
 
 ## Desktop GUI (Windows / macOS / Linux)
 
+### Option A — download a ready-made binary (no Python needed)
+
+Grab the latest release from the [Releases page](../../releases):
+
+| OS | File |
+|---|---|
+| Windows | `HallAircon.exe` — double-click to run |
+| macOS | `HallAircon-macos` — right-click → Open (unsigned build; see note below) |
+| Linux | `HallAircon-linux` — `chmod +x` then run |
+
+macOS note: the binary is not notarized, so Gatekeeper may complain on first
+run — right-click the file → Open → Open again, or run `xattr -cr
+HallAircon-macos` once. Windows note: some antivirus tools flag single-file
+PyInstaller builds; add an exception if needed.
+
+### Option B — run from source
+
 ```bash
 pip install customtkinter
 python gui.py
 ```
+
+### Blurry UI?
+
+On Windows the app already enables per-monitor DPI awareness. If it still
+looks blurry: right-click the .exe → Properties → Compatibility → Change high
+DPI settings → tick "Override high DPI scaling behavior" → System (Enhanced).
+On Linux, run with integer display scaling (100 % / 200 %) for the sharpest
+rendering.
 
 The GUI has three tabs:
 
@@ -32,13 +57,16 @@ app probes the hardware once (while the unit is on) and then greys out the
 controls with a "not supported by this unit" label — some hall units don't
 have these features. The result is remembered per aircon unit.
 
-To ship a single-file executable for other students:
+To build the single-file executables yourself (on each target OS):
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name HallAircon gui.py
-# binary lands in dist/ (build on each OS you want to support)
+pyinstaller --onefile --windowed --collect-all customtkinter --name HallAircon gui.py
 ```
+
+Releases are built automatically by
+[.github/workflows/build.yml](.github/workflows/build.yml) whenever a `v*`
+tag is pushed.
 
 ## Command-line tool
 

@@ -15,10 +15,25 @@ Features:
 """
 
 import queue
+import sys
 import threading
 import time
 import webbrowser
 from datetime import datetime
+
+# Windows: opt into per-monitor DPI awareness before any window is created,
+# otherwise Tk windows get bitmap-scaled by Windows and look blurry on
+# high-DPI / mixed-DPI setups.
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 import customtkinter as ctk
 

@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 config.json
 .env
+build/
+dist/
+*.spec
