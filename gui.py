@@ -3,9 +3,19 @@
 
 Runs on Windows, macOS and Linux. Requires: customtkinter
     pip install customtkinter
+
+Features:
+  - control: power, temperature, fan speed, swing
+  - telemetry: room temperature, mode, online status, maintenance, balance,
+    estimated cost of the current session
+  - history: usage sessions (with cost) and top-ups
+  - inbox: service notifications
+  - automatic fan/swing support detection: if the unit never reports
+    fanstep/flap, the controls are greyed out and labelled unsupported
 """
 
 import threading
+import time
 import webbrowser
 from datetime import datetime
 
@@ -14,10 +24,15 @@ import customtkinter as ctk
 import hall_aircon_api as api
 
 POLL_SECONDS = 10
+HISTORY_EVERY = 6          # fetch history/inbox every 6th poll (~1 min)
+PROBE_DEADLINE = 60        # seconds to wait for a capability probe answer
+DEFAULT_RATE = 0.0065      # SGD per minute fallback
+
 GREEN = "#2E7D32"
 GRAY = "#5A5A5A"
 RED = "#C62828"
 AMBER = "#F9A825"
+MODE_NAMES = {"C": "Cool", "A": "Auto", "D": "Dry", "F": "Fan only", "H": "Heat"}
 
 
 class App(ctk.CTk):
@@ -27,19 +42,24 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("Hall Aircon")
-        self.geometry("430x720")
-        self.minsize(400, 640)
+        self.geometry("440x760")
+        self.minsize(410, 660)
 
-        self.state = None            # latest /me data
+        self.state = None               # latest /me data
         self.temp_min, self.temp_max = 16, 30
+        self.config_loaded = False
         self.busy = False
+        self.tick = 0
         self.logged_in_email = None
+        self.usage_cache, self.topup_cache, self.inbox_cache = [], [], []
+        self.probing = False
+        self.probe_deadline = 0.0
+
         self._build_login()
         self._build_main()
 
         self.show_login()
-        token = api.get_token()
-        if token:
+        if api.get_token():
             self.load_main()
         self._schedule_poll()
 
@@ -53,11 +73,8 @@ class App(ctk.CTk):
 
         self.email_entry = ctk.CTkEntry(self.login_frame, width=300, placeholder_text="you@e.ntu.edu.sg")
         self.email_entry.pack(pady=6)
-
-        # password pane (non-student accounts)
         self.password_entry = ctk.CTkEntry(self.login_frame, width=300, placeholder_text="Password", show="*")
 
-        # SSO pane (student accounts)
         self.sso_pane = ctk.CTkFrame(self.login_frame, fg_color="transparent")
         ctk.CTkLabel(self.sso_pane, text="1. Open the NTU sign-in page:", font=ctk.CTkFont(size=12)).pack(pady=(4, 0))
         self.open_browser_btn = ctk.CTkButton(self.sso_pane, text="Open login page in browser", width=300, command=self.open_sso_url)
@@ -71,7 +88,6 @@ class App(ctk.CTk):
 
         self.login_btn = ctk.CTkButton(self.login_frame, text="Continue", width=300, command=self.start_login)
         self.login_btn.pack(pady=10)
-
         self.back_btn = ctk.CTkButton(self.login_frame, text="Back", width=100, fg_color="transparent", border_width=1,
                                       command=self.show_email_step)
         self.login_error = ctk.CTkLabel(self.login_frame, text="", text_color="#ff8a80", wraplength=300, font=ctk.CTkFont(size=12))
@@ -81,22 +97,39 @@ class App(ctk.CTk):
         self.main_frame = ctk.CTkFrame(self)
 
         self.header = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=20, weight="bold"))
-        self.header.pack(pady=(24, 0))
+        self.header.pack(pady=(20, 0))
         self.sub_header = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=13), text_color="#9e9e9e")
-        self.sub_header.pack(pady=(0, 8))
+        self.sub_header.pack(pady=(0, 4))
+        self.warn_label = ctk.CTkLabel(self.main_frame, text="", text_color=AMBER, font=ctk.CTkFont(size=13), wraplength=390)
+        self.warn_label.pack(pady=(0, 2))
 
-        self.balance_label = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=15))
-        self.balance_label.pack(pady=(0, 10))
+        self.tabs = ctk.CTkTabview(self.main_frame)
+        self.tabs.pack(fill="both", expand=True, padx=16, pady=(4, 4))
+        self.tabs.add("Control")
+        self.tabs.add("History")
+        self.tabs.add("Inbox")
+        self._build_control_tab(self.tabs.tab("Control"))
+        self._build_history_tab(self.tabs.tab("History"))
+        self._build_inbox_tab(self.tabs.tab("Inbox"))
 
-        self.warn_label = ctk.CTkLabel(self.main_frame, text="", text_color=AMBER, font=ctk.CTkFont(size=13), wraplength=360)
-        self.warn_label.pack(pady=(0, 6))
+        self.footer = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=12), text_color="#9e9e9e")
+        self.footer.pack(side="bottom", pady=(0, 4))
+        self.logout_btn = ctk.CTkButton(self.main_frame, text="Log out", width=100, fg_color="transparent",
+                                        border_width=1, command=self.do_logout)
+        self.logout_btn.pack(side="bottom", pady=(0, 12))
 
-        self.power_btn = ctk.CTkButton(self.main_frame, width=280, height=84, corner_radius=16,
+    def _build_control_tab(self, tab):
+        self.balance_label = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=15))
+        self.balance_label.pack(pady=(10, 4))
+        self.session_label = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color="#9e9e9e")
+        self.session_label.pack(pady=(0, 6))
+
+        self.power_btn = ctk.CTkButton(tab, width=280, height=84, corner_radius=16,
                                        font=ctk.CTkFont(size=26, weight="bold"),
                                        command=self.toggle_power)
-        self.power_btn.pack(pady=(6, 18))
+        self.power_btn.pack(pady=(2, 14))
 
-        temp_row = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        temp_row = ctk.CTkFrame(tab, fg_color="transparent")
         temp_row.pack(pady=4)
         self.temp_down = ctk.CTkButton(temp_row, text="−", width=52, height=52, font=ctk.CTkFont(size=24, weight="bold"),
                                        command=lambda: self.step_temp(-1))
@@ -110,11 +143,11 @@ class App(ctk.CTk):
                                      command=lambda: self.step_temp(1))
         self.temp_up.pack(side="left", padx=8)
 
-        self.current_label = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=13), text_color="#9e9e9e")
-        self.current_label.pack(pady=(2, 12))
+        self.current_label = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=13), text_color="#9e9e9e")
+        self.current_label.pack(pady=(2, 10))
 
-        ctk.CTkLabel(self.main_frame, text="Fan speed", font=ctk.CTkFont(size=13)).pack()
-        fan_row = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        ctk.CTkLabel(tab, text="Fan speed", font=ctk.CTkFont(size=13)).pack()
+        fan_row = ctk.CTkFrame(tab, fg_color="transparent")
         fan_row.pack(pady=4)
         self.fan_btns = {}
         for i, level in enumerate(api.FAN_LEVELS):
@@ -123,23 +156,31 @@ class App(ctk.CTk):
                                 command=lambda lv=level: self.set_fan(lv))
             btn.pack(side="left", padx=3)
             self.fan_btns[level] = btn
+        self.fan_hint = ctk.CTkLabel(tab, text="Auto, 1 = low … 5 = high", font=ctk.CTkFont(size=11), text_color="#757575")
+        self.fan_hint.pack(pady=(2, 10))
 
-        ctk.CTkLabel(self.main_frame, text="(Auto, 1 = low … 5 = high)", font=ctk.CTkFont(size=11), text_color="#757575").pack(pady=(0, 12))
-
-        self.swing_switch = ctk.CTkSwitch(self.main_frame, text="Swing (louver)", font=ctk.CTkFont(size=14),
+        self.swing_switch = ctk.CTkSwitch(tab, text="Swing (louver)", font=ctk.CTkFont(size=14),
                                           command=self.toggle_swing)
         self.swing_switch.pack(pady=4)
-        ctk.CTkLabel(self.main_frame, text="Fan & swing work only on units that support them.",
-                     font=ctk.CTkFont(size=11), text_color="#757575").pack(pady=(0, 14))
+        self.swing_hint = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=11), text_color="#757575")
+        self.swing_hint.pack(pady=(0, 12))
 
-        self.footer = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=12), text_color="#9e9e9e")
-        self.footer.pack(side="bottom", pady=(0, 8))
+    def _build_history_tab(self, tab):
+        ctk.CTkLabel(tab, text="Usage sessions", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(10, 4))
+        self.usage_summary = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color="#9e9e9e")
+        self.usage_summary.pack(pady=(0, 4))
+        self.usage_box = ctk.CTkScrollableFrame(tab, height=180)
+        self.usage_box.pack(fill="x", padx=10)
 
-        self.logout_btn = ctk.CTkButton(self.main_frame, text="Log out", width=100, fg_color="transparent",
-                                        border_width=1, command=self.do_logout)
-        self.logout_btn.pack(side="bottom", pady=(0, 14))
+        ctk.CTkLabel(tab, text="Top-ups", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(12, 4))
+        self.topup_box = ctk.CTkScrollableFrame(tab, height=120)
+        self.topup_box.pack(fill="x", padx=10, pady=(0, 10))
 
-    # -------------------------------------------------------------- screen mgmt
+    def _build_inbox_tab(self, tab):
+        self.inbox_box = ctk.CTkScrollableFrame(tab)
+        self.inbox_box.pack(fill="both", expand=True, padx=10, pady=10)
+
+    # -------------------------------------------------------------- screens
     def show_login(self):
         self.main_frame.pack_forget()
         self.login_frame.place(relx=0.5, rely=0.5, anchor="center")
@@ -159,7 +200,7 @@ class App(ctk.CTk):
     def _set_login_error(self, message: str):
         self.login_error.configure(text=message)
 
-    # -------------------------------------------------------------- threading
+    # -------------------------------------------------------------- threads
     def _run(self, fn, on_ok=None, on_err=None):
         def worker():
             try:
@@ -191,13 +232,11 @@ class App(ctk.CTk):
         data = r.get("data") or {}
         self.login_btn.pack_forget()
         if data.get("ad_status"):
-            # student account → NTU SSO in browser
             self.sso_url = data.get("login_url") or api.SAML_PREFIX
             self.sso_pane.pack(pady=4)
             self.back_btn.pack(pady=4)
             self._set_login_error("")
         else:
-            # non-student → password
             self.password_entry.pack(pady=6)
             self.login_btn.configure(text="Log in", command=self.do_password_login)
             self.login_btn.pack(pady=10)
@@ -233,6 +272,7 @@ class App(ctk.CTk):
 
     def _after_login(self):
         self._set_login_error("")
+        self.config_loaded = False
         self.load_main()
 
     def do_logout(self):
@@ -246,7 +286,7 @@ class App(ctk.CTk):
         self.state = None
         self.show_login()
 
-    # -------------------------------------------------------------- main screen
+    # -------------------------------------------------------------- data
     def load_main(self):
         self.show_main()
         self.refresh(initial=True)
@@ -263,26 +303,40 @@ class App(ctk.CTk):
 
     def _fetch_all(self, token):
         me = api.api_request("GET", "me", token=token)
-        try:
-            lo = api.api_request("GET", "app-config/temperature_allowed_min", token=token)
-            self.temp_min = int(lo["data"]["value"])
-        except (api.ApiError, KeyError, TypeError, ValueError):
-            pass
-        try:
-            hi = api.api_request("GET", "app-config/temperature_allowed_max", token=token)
-            self.temp_max = int(hi["data"]["value"])
-        except (api.ApiError, KeyError, TypeError, ValueError):
-            pass
+        if not self.config_loaded:
+            try:
+                lo = api.api_request("GET", "app-config/temperature_allowed_min", token=token)
+                self.temp_min = int(lo["data"]["value"])
+            except (api.ApiError, KeyError, TypeError, ValueError):
+                pass
+            try:
+                hi = api.api_request("GET", "app-config/temperature_allowed_max", token=token)
+                self.temp_max = int(hi["data"]["value"])
+            except (api.ApiError, KeyError, TypeError, ValueError):
+                pass
+            self.config_loaded = True
         return me
 
+    def _fetch_lists(self, token):
+        usage = api.api_request("GET", "usage/history?limit=20", token=token)
+        topups = api.api_request("GET", "topup/history?limit=10", token=token)
+        inbox = api.api_request("GET", "notification?limit=20", token=token)
+        return usage, topups, inbox
+
+    # -------------------------------------------------------------- render
     def _render(self, me):
         data = me.get("data") or {}
         self.state = data
         a = data.get("aircon") or {}
+        code = a.get("aircon_code") or "?"
 
-        room = a.get("room_name") or a.get("aircon_code") or ""
+        self._track_session(a)
+        self._update_capabilities(a)
+
         hall = (a.get("hall") or {}).get("hall_name", "")
-        self.header.configure(text=f"{hall} · {room}" if hall else room or "No aircon paired")
+        room = a.get("room_name") or a.get("aircon_code") or ""
+        dot = "● " if a.get("comm_stat") else "○ "
+        self.header.configure(text=f"{dot}{hall} · {room}" if hall else f"{dot}{room or 'No aircon paired'}")
         self.balance_label.configure(text=f"Balance: SGD {data.get('balance', '—')}")
 
         if not a:
@@ -290,14 +344,15 @@ class App(ctk.CTk):
             self.warn_label.configure(text="")
             self._set_controls_enabled(False)
         elif a.get("maintenance_mode"):
-            self.warn_label.configure(text="⚠ The aircon is under maintenance")
             self.sub_header.configure(text="")
+            self.warn_label.configure(text="⚠ The aircon is under maintenance")
             self._set_controls_enabled(False)
         elif not a.get("comm_stat"):
-            self.warn_label.configure(text="⚠ Aircon is offline — commands may not reach it")
             self.sub_header.configure(text="")
+            self.warn_label.configure(text="⚠ Aircon is offline — commands may not reach it")
             self._set_controls_enabled(False)
         else:
+            self.sub_header.configure(text="")
             self.warn_label.configure(text="")
             self._set_controls_enabled(True)
 
@@ -310,11 +365,13 @@ class App(ctk.CTk):
         setpoint = a.get("setpoint")
         self.setpoint_label.configure(text=str(setpoint) if setpoint is not None else "--")
         cur = a.get("current_temperature")
-        mode = a.get("mode")
-        self.current_label.configure(
-            text=(f"Room: {cur}°C" if cur is not None else "Room: —") +
-                 (f"  ·  mode {mode}" if mode else "")
-        )
+        mode = MODE_NAMES.get(a.get("mode") or "", a.get("mode") or "")
+        parts = []
+        if cur is not None:
+            parts.append(f"Room: {cur}°C")
+        if mode:
+            parts.append(mode)
+        self.current_label.configure(text="  ·  ".join(parts) if parts else "")
         self.temp_down.configure(state="normal" if power_on and setpoint and setpoint > self.temp_min else "disabled")
         self.temp_up.configure(state="normal" if power_on and setpoint is not None and setpoint < self.temp_max else "disabled")
 
@@ -326,7 +383,9 @@ class App(ctk.CTk):
         if flap in ("S", "N"):
             self.swing_switch.select() if flap == "S" else self.swing_switch.deselect()
 
+        self._update_session_label(a)
         self.footer.configure(text=f"Updated {datetime.now().strftime('%H:%M:%S')}")
+        self._render_cached_lists()
 
     def _render_error(self, message, initial):
         self.footer.configure(text=message)
@@ -334,15 +393,195 @@ class App(ctk.CTk):
             self.header.configure(text="Could not load data")
             self.sub_header.configure(text=message)
 
+    # -------------------------------------------------------------- telemetry extras
+    def _track_session(self, a):
+        """Remember when the unit switched on, so we can estimate live cost."""
+        code = a.get("aircon_code")
+        config = api.load_config()
+        sessions = config.setdefault("session_start", {})
+        changed = False
+        if a.get("power") and code and code not in sessions:
+            sessions[code] = time.time()
+            changed = True
+        elif not a.get("power") and code in sessions:
+            sessions.pop(code, None)
+            changed = True
+        if changed:
+            config["session_start"] = sessions
+            api.save_config(config)
+
+    def _session_rate(self):
+        for row in self.usage_cache:
+            if isinstance(row.get("rate"), (int, float)) and row.get("rate") > 0:
+                return float(row["rate"])
+        return DEFAULT_RATE
+
+    def _update_session_label(self, a):
+        code = a.get("aircon_code")
+        start = (api.load_config().get("session_start") or {}).get(code)
+        if a.get("power") and start:
+            minutes = (time.time() - start) / 60
+            cost = minutes * self._session_rate()
+            self.session_label.configure(text=f"Running {int(minutes)} min · ≈ SGD {cost:.2f} "
+                                             f"(rate SGD {self._session_rate():.4f}/min)")
+        else:
+            self.session_label.configure(text="")
+
+    # -------------------------------------------------------------- capability probe
+    def _caps(self, code):
+        return (api.load_config().get("capabilities") or {}).get(code, {})
+
+    def _set_cap(self, code, key, value):
+        config = api.load_config()
+        caps = config.setdefault("capabilities", {})
+        caps.setdefault(code, {})[key] = value
+        api.save_config(config)
+
+    def _update_capabilities(self, a):
+        code = a.get("aircon_code")
+        if not code:
+            return
+        caps = self._caps(code)
+
+        # values reported by the unit → supported
+        if a.get("fanstep"):
+            caps["fan"] = True
+        if a.get("flap"):
+            caps["swing"] = True
+        if "fan" in caps and "swing" in caps:
+            self.probing = False
+            self._set_cap(code, "fan", caps["fan"])
+            self._set_cap(code, "swing", caps["swing"])
+
+        self._apply_cap_ui(code, caps)
+
+        # run a one-time probe for unknown capabilities while the unit is on
+        if (not self.probing and a.get("power") and a.get("comm_stat")
+                and ("fan" not in caps or "swing" not in caps)):
+            self.probing = True
+            self.probe_deadline = time.time() + PROBE_DEADLINE
+            body = {}
+            if "fan" not in caps:
+                body["fanstep"] = "A"
+            if "swing" not in caps:
+                body["flap"] = "N"
+            self.footer.configure(text="Checking which features your unit supports…")
+            token = api.get_token()
+
+            def ok(_r):
+                pass
+
+            def err(e):
+                self.probing = False
+                self.footer.configure(text=e)
+            self._run(lambda: api.api_request("POST", "v2/ac/control", token=token, body=body), on_ok=ok, on_err=err)
+
+        # deadline expired → mark still-null capabilities as unsupported
+        if self.probing and time.time() > self.probe_deadline:
+            self.probing = False
+            if "fan" not in caps:
+                caps["fan"] = False
+            if "swing" not in caps:
+                caps["swing"] = False
+            self._set_cap(code, "fan", caps["fan"])
+            self._set_cap(code, "swing", caps["swing"])
+            self._apply_cap_ui(code, caps)
+            self.footer.configure(text=f"Updated {datetime.now().strftime('%H:%M:%S')}")
+
+    def _apply_cap_ui(self, code, caps):
+        fan_known = "fan" in caps
+        swing_known = "swing" in caps
+
+        if fan_known and caps["fan"]:
+            self.fan_hint.configure(text="Auto, 1 = low … 5 = high")
+            for btn in self.fan_btns.values():
+                btn.configure(state="normal")
+        elif fan_known and not caps["fan"]:
+            self.fan_hint.configure(text="Fan speed is not supported by this unit", text_color=AMBER)
+            for btn in self.fan_btns.values():
+                btn.configure(state="disabled")
+        else:
+            self.fan_hint.configure(text="Checking fan speed support…")
+            for btn in self.fan_btns.values():
+                btn.configure(state="disabled")
+
+        if swing_known and caps["swing"]:
+            self.swing_hint.configure(text="")
+            self.swing_switch.configure(state="normal")
+        elif swing_known and not caps["swing"]:
+            self.swing_hint.configure(text="Swing is not supported by this unit", text_color=AMBER)
+            self.swing_switch.configure(state="disabled")
+        else:
+            self.swing_hint.configure(text="Checking swing support…")
+            self.swing_switch.configure(state="disabled")
+
     def _set_controls_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"
         self.power_btn.configure(state=state)
-        for btn in self.fan_btns.values():
-            btn.configure(state=state)
-        if enabled:
+        caps = self._caps((self.state or {}).get("aircon", {}).get("aircon_code"))
+        for level, btn in self.fan_btns.items():
+            btn.configure(state=state if (enabled and caps.get("fan", False)) else "disabled")
+        if enabled and caps.get("swing", False):
             self.swing_switch.configure(state="normal")
         else:
             self.swing_switch.configure(state="disabled")
+        if enabled:
+            self.temp_down.configure(state="normal")
+            self.temp_up.configure(state="normal")
+        else:
+            self.temp_down.configure(state="disabled")
+            self.temp_up.configure(state="disabled")
+
+    # -------------------------------------------------------------- lists
+    def _render_cached_lists(self):
+        if self.usage_cache:
+            self._render_usage(self.usage_cache)
+        if self.topup_cache:
+            self._render_topups(self.topup_cache)
+        if self.inbox_cache:
+            self._render_inbox(self.inbox_cache)
+
+    def _render_usage(self, rows):
+        today = datetime.now().strftime("%Y-%m-%d")
+        today_min = sum(float(r.get("duration") or 0) for r in rows if (r.get("starttime") or "").startswith(today))
+        today_cost = sum(float(r.get("amount") or 0) for r in rows if (r.get("starttime") or "").startswith(today))
+        self.usage_summary.configure(text=f"Today: {int(today_min)} min · SGD {today_cost:.2f}")
+
+        for w in self.usage_box.winfo_children():
+            w.destroy()
+        for row in rows[:20]:
+            start = (row.get("starttime") or "")[5:16]
+            mins = row.get("duration")
+            cost = row.get("amount")
+            text = f"{start}   {mins} min   SGD {cost}"
+            ctk.CTkLabel(self.usage_box, text=text, anchor="w", font=ctk.CTkFont(size=12)).pack(fill="x", pady=1)
+        if not rows:
+            ctk.CTkLabel(self.usage_box, text="No usage yet", text_color="#757575").pack(anchor="w")
+
+    def _render_topups(self, rows):
+        for w in self.topup_box.winfo_children():
+            w.destroy()
+        for row in rows[:10]:
+            date = (row.get("created_on") or "")[:10]
+            text = f"{date}   {row.get('type')}   SGD {row.get('amount')}   ref {row.get('txn_id')}"
+            ctk.CTkLabel(self.topup_box, text=text, anchor="w", font=ctk.CTkFont(size=12)).pack(fill="x", pady=1)
+        if not rows:
+            ctk.CTkLabel(self.topup_box, text="No top-ups yet", text_color="#757575").pack(anchor="w")
+
+    def _render_inbox(self, rows):
+        for w in self.inbox_box.winfo_children():
+            w.destroy()
+        for row in rows[:20]:
+            card = ctk.CTkFrame(self.inbox_box)
+            card.pack(fill="x", pady=3)
+            ctk.CTkLabel(card, text=row.get("title") or "(no title)", anchor="w",
+                         font=ctk.CTkFont(size=13, weight="bold")).pack(fill="x", padx=8, pady=(6, 0))
+            ctk.CTkLabel(card, text=row.get("message") or "", anchor="w", justify="left",
+                         wraplength=360, font=ctk.CTkFont(size=12)).pack(fill="x", padx=8, pady=(0, 2))
+            ctk.CTkLabel(card, text=(row.get("send_on") or "")[:16], anchor="w",
+                         text_color="#757575", font=ctk.CTkFont(size=11)).pack(fill="x", padx=8, pady=(0, 6))
+        if not rows:
+            ctk.CTkLabel(self.inbox_box, text="No messages", text_color="#757575").pack(anchor="w")
 
     # -------------------------------------------------------------- actions
     def _send(self, body, success_note=""):
@@ -351,9 +590,6 @@ class App(ctk.CTk):
         self.busy = True
         self.footer.configure(text="Sending…")
         token = api.get_token()
-
-        def work():
-            return api.api_request("POST", "v2/ac/control", token=token, body=body)
 
         def ok(_r):
             self.busy = False
@@ -364,7 +600,8 @@ class App(ctk.CTk):
             self.busy = False
             self.footer.configure(text=e)
 
-        self._run(work, on_ok=ok, on_err=err)
+        self._run(lambda: api.api_request("POST", "v2/ac/control", token=token, body=body),
+                  on_ok=ok, on_err=err)
 
     def toggle_power(self):
         a = (self.state or {}).get("aircon") or {}
@@ -381,20 +618,33 @@ class App(ctk.CTk):
             self._send({"setpoint": str(new)})
 
     def set_fan(self, level):
-        self._send({"fanstep": level}, success_note=f"Fan set to {level} (if your unit supports it)")
+        self._send({"fanstep": level}, success_note=f"Fan set to {level}")
 
     def toggle_swing(self):
         value = "S" if self.swing_switch.get() else "N"
-        self._send({"flap": value}, success_note=f"Swing {'on' if value == 'S' else 'off'} (if your unit supports it)")
+        self._send({"flap": value}, success_note=f"Swing {'on' if value == 'S' else 'off'}")
 
     # -------------------------------------------------------------- polling
     def _schedule_poll(self):
         self.after(POLL_SECONDS * 1000, self._poll_tick)
 
     def _poll_tick(self):
+        self.tick += 1
         if self.main_frame.winfo_ismapped() and api.get_token():
             self.refresh()
+            if self.tick % HISTORY_EVERY == 0:
+                self._run(
+                    lambda: self._fetch_lists(api.get_token()),
+                    on_ok=lambda t: self._cache_lists(*t),
+                    on_err=lambda _e: None,
+                )
         self._schedule_poll()
+
+    def _cache_lists(self, usage, topups, inbox):
+        self.usage_cache = usage.get("data") or []
+        self.topup_cache = topups.get("data") or []
+        self.inbox_cache = inbox.get("data") or []
+        self._render_cached_lists()
 
 
 if __name__ == "__main__":

@@ -15,10 +15,22 @@ pip install customtkinter
 python gui.py
 ```
 
-The GUI shows a big on/off button, temperature controls, fan speed and swing,
-your balance and room temperature, and refreshes automatically every 10 s.
+The GUI has three tabs:
+
+- **Control** — big on/off button, temperature, fan speed and swing, balance,
+  room temperature, mode, online/maintenance status, and an estimate of the
+  running session's cost.
+- **History** — usage sessions (minutes + cost, with a daily total) and
+  top-ups.
+- **Inbox** — service notifications.
+
 Student login: it opens the NTU sign-in page in your browser, you paste the
 redirect URL back, done.
+
+**Fan/swing auto-detection**: if the unit never reports `fanstep`/`flap`, the
+app probes the hardware once (while the unit is on) and then greys out the
+controls with a "not supported by this unit" label — some hall units don't
+have these features. The result is remembered per aircon unit.
 
 To ship a single-file executable for other students:
 
