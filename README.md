@@ -17,12 +17,13 @@ Grab the latest release from the [Releases page](../../releases):
 | OS | File |
 |---|---|
 | Windows | `HallAircon.exe` — double-click to run |
-| macOS | `HallAircon-macos` — right-click → Open (unsigned build; see note below) |
+| macOS (Apple Silicon) | `HallAircon-macos-arm64` — right-click → Open (unsigned build; see note below) |
+| macOS (Intel) | `HallAircon-macos-x64` — right-click → Open (unsigned build; see note below) |
 | Linux | `HallAircon-linux` — `chmod +x` then run |
 
-macOS note: the binary is not notarized, so Gatekeeper may complain on first
-run — right-click the file → Open → Open again, or run `xattr -cr
-HallAircon-macos` once. Windows note: some antivirus tools flag single-file
+macOS note: the binaries are not notarized, so Gatekeeper may complain on
+first run — right-click the file → Open → Open again, or run `xattr -cr
+HallAircon-macos-*` once. Windows note: some antivirus tools flag single-file
 PyInstaller builds; add an exception if needed.
 
 ### Option B — run from source
