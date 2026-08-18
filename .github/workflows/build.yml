@@ -20,9 +20,6 @@ jobs:
           - os: macos-latest
             name: HallAircon-macos-arm64
             artifact: HallAircon-macos-arm64
-          - os: macos-13
-            name: HallAircon-macos-x64
-            artifact: HallAircon-macos-x64
           - os: ubuntu-latest
             name: HallAircon-linux
             artifact: HallAircon-linux
