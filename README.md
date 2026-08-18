@@ -58,6 +58,13 @@ app probes the hardware once (while the unit is on) and then greys out the
 controls with a "not supported by this unit" label — some hall units don't
 have these features. The result is remembered per aircon unit.
 
+**Smart mode (save money)**: billing charges per minute the unit is *on*, so
+the app can act as a bang-bang thermostat — cool to 22 °C (internally), turn
+the unit off, and only restart when the room reaches your target +1 °C (target
+is configurable 23–26 °C). You only pay for active cooling time, and shutdowns
+are aligned to whole-minute boundaries to avoid the billing round-up. Manual
+controls disable Smart mode automatically.
+
 To build the single-file executables yourself (on each target OS):
 
 ```bash

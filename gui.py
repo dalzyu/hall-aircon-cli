@@ -72,8 +72,22 @@ class App(ctk.CTk):
         self.probe_deadline = 0.0
         self._ui_queue = queue.Queue()  # thread -> main-thread callback queue
 
+        # smart (bang-bang) mode state
+        sc = api.load_config().get("smart") or {}
+        self.smart_enabled = bool(sc.get("enabled"))
+        self.smart_target = max(23, min(26, int(sc.get("target", 24))))
+        st = api.load_config().get("smart_stats") or {"date": "", "on_s": 0, "win_s": 0}
+        self._smart_stats = st
+        self._smart_last_ts = time.time()
+        self._smart_last_save = time.time()
+
         self._build_login()
         self._build_main()
+        self.smart_target_lbl.configure(text=f"{self.smart_target}°C")
+        if self.smart_enabled:
+            self.smart_switch.select()
+            self.smart_status.configure(
+                text=f"Smart ON — cools to {self.smart_target - 1}°C, then off until {self.smart_target + 1}°C")
 
         self.show_login()
         if api.get_token():
@@ -150,6 +164,23 @@ class App(ctk.CTk):
         self.balance_label.pack(pady=(10, 4))
         self.session_label = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color="#9e9e9e")
         self.session_label.pack(pady=(0, 6))
+
+        # smart (bang-bang) mode: cool to target-1, restart at target+1
+        smart_frame = ctk.CTkFrame(tab)
+        smart_frame.pack(pady=(0, 8))
+        self.smart_switch = ctk.CTkSwitch(smart_frame, text="Smart (save money)", font=ctk.CTkFont(size=14),
+                                          command=self._toggle_smart)
+        self.smart_switch.pack(side="left", padx=10)
+        self.smart_minus = ctk.CTkButton(smart_frame, text="−", width=30, height=28,
+                                         command=lambda: self._smart_target_delta(-1))
+        self.smart_minus.pack(side="left", padx=2)
+        self.smart_target_lbl = ctk.CTkLabel(smart_frame, text="24°C", font=ctk.CTkFont(size=15, weight="bold"))
+        self.smart_target_lbl.pack(side="left", padx=4)
+        self.smart_plus = ctk.CTkButton(smart_frame, text="+", width=30, height=28,
+                                        command=lambda: self._smart_target_delta(1))
+        self.smart_plus.pack(side="left", padx=2)
+        self.smart_status = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color=AMBER, wraplength=380)
+        self.smart_status.pack(pady=(0, 4))
 
         self.power_btn = ctk.CTkButton(tab, width=280, height=84, corner_radius=16,
                                        font=ctk.CTkFont(size=26, weight="bold"),
@@ -345,9 +376,10 @@ class App(ctk.CTk):
         if not self.config_loaded:
             try:
                 lo = api.api_request("GET", "app-config/temperature_allowed_min", token=token)
-                self.temp_min = int(lo["data"]["value"])
+                # user-facing floor is 23 C (smart mode still uses 22 internally)
+                self.temp_min = max(int(lo["data"]["value"]), 23)
             except (api.ApiError, KeyError, TypeError, ValueError):
-                pass
+                self.temp_min = 23
             try:
                 hi = api.api_request("GET", "app-config/temperature_allowed_max", token=token)
                 self.temp_max = int(hi["data"]["value"])
@@ -423,6 +455,7 @@ class App(ctk.CTk):
             self.swing_switch.select() if flap == "S" else self.swing_switch.deselect()
 
         self._update_session_label(a)
+        self._smart_tick(a)
         self.footer.configure(text=f"Updated {datetime.now().strftime('%H:%M:%S')}")
         self._render_cached_lists()
 
@@ -465,6 +498,93 @@ class App(ctk.CTk):
                                              f"(rate SGD {self._session_rate():.4f}/min)")
         else:
             self.session_label.configure(text="")
+
+    # -------------------------------------------------------------- smart (bang-bang) mode
+    def _toggle_smart(self):
+        self._set_smart(bool(self.smart_switch.get()))
+
+    def _set_smart(self, enabled: bool):
+        self.smart_enabled = enabled
+        config = api.load_config()
+        config["smart"] = {"enabled": enabled, "target": self.smart_target}
+        api.save_config(config)
+        if enabled:
+            self.smart_switch.select()
+            self._smart_stats_reset_if_needed()
+            self.smart_status.configure(
+                text=f"Smart ON — cools to {self.smart_target - 1}°C, then off until {self.smart_target + 1}°C")
+        else:
+            self.smart_switch.deselect()
+            self.smart_status.configure(text="Smart mode off")
+        self._update_smart_label()
+
+    def _smart_target_delta(self, delta):
+        # user-facing target range 23..26; smart cools to 22 internally
+        new = max(23, min(26, self.smart_target + delta))
+        if new == self.smart_target:
+            return
+        self.smart_target = new
+        self.smart_target_lbl.configure(text=f"{new}°C")
+        config = api.load_config()
+        config["smart"] = {"enabled": self.smart_enabled, "target": new}
+        api.save_config(config)
+        if self.smart_enabled:
+            self.smart_status.configure(
+                text=f"Smart ON — cools to {new - 1}°C, then off until {new + 1}°C")
+
+    def _smart_stats_reset_if_needed(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._smart_stats.get("date") != today:
+            self._smart_stats = {"date": today, "on_s": 0, "win_s": 0}
+            self._smart_last_save = time.time()
+
+    def _smart_stats_accumulate(self, power_on: bool):
+        now = time.time()
+        delta = max(1, int(now - self._smart_last_ts))
+        self._smart_last_ts = now
+        self._smart_stats["win_s"] = int(self._smart_stats.get("win_s", 0)) + delta
+        if power_on:
+            self._smart_stats["on_s"] = int(self._smart_stats.get("on_s", 0)) + delta
+        if now - self._smart_last_save > 60:
+            config = api.load_config()
+            config["smart_stats"] = self._smart_stats
+            api.save_config(config)
+            self._smart_last_save = now
+        self._update_smart_label()
+
+    def _update_smart_label(self):
+        on_s = int(self._smart_stats.get("on_s", 0))
+        win_s = max(int(self._smart_stats.get("win_s", 0)), 1)
+        duty = 100.0 * on_s / win_s
+        saved = (win_s - on_s) / 60.0 * self._session_rate()
+        if self.smart_enabled and win_s >= 60:
+            self.smart_status.configure(
+                text=f"Smart: duty {duty:.0f}% · ≈ SGD {saved:.2f} saved since {self._smart_stats.get('date', '')}"
+                     f" — cools to {self.smart_target - 1}°C, restarts at {self.smart_target + 1}°C")
+
+    def _smart_tick(self, a):
+        """Bang-bang controller: cycle power to keep the room in [target-1, target+1]."""
+        if not self.smart_enabled or self.busy or self.probing:
+            return
+        t = a.get("current_temperature")
+        if t is None or not a.get("comm_stat") or a.get("maintenance_mode"):
+            return
+        self._smart_stats_reset_if_needed()
+        self._smart_stats_accumulate(bool(a.get("power")))
+
+        low = self.smart_target - 1
+        high = self.smart_target + 1
+        if a.get("power"):
+            if t <= low:
+                start = (api.load_config().get("session_start") or {}).get(a.get("aircon_code"))
+                if start is None or (time.time() - start) % 60 <= 2:
+                    # align the shutdown with a whole-minute boundary: billing
+                    # rounds UP, so ending at X:00 pays exactly X minutes
+                    self._send({"power": "0"}, success_note=f"Smart: cooled to {t}°C, turning off")
+        else:
+            if t >= high:
+                self._send({"power": "1", "setpoint": "22"},
+                           success_note=f"Smart: warmed to {t}°C, turning on (setpoint 22)")
 
     # -------------------------------------------------------------- capability probe
     def _caps(self, code):
@@ -645,11 +765,15 @@ class App(ctk.CTk):
                   on_ok=ok, on_err=err)
 
     def toggle_power(self):
+        if self.smart_enabled:
+            self._set_smart(False)
         a = (self.state or {}).get("aircon") or {}
         target = "0" if a.get("power") else "1"
         self._send({"power": target})
 
     def step_temp(self, delta):
+        if self.smart_enabled:
+            self._set_smart(False)
         a = (self.state or {}).get("aircon") or {}
         cur = a.get("setpoint")
         if cur is None:
@@ -659,9 +783,13 @@ class App(ctk.CTk):
             self._send({"setpoint": str(new)})
 
     def set_fan(self, level):
+        if self.smart_enabled:
+            self._set_smart(False)
         self._send({"fanstep": level}, success_note=f"Fan set to {level}")
 
     def toggle_swing(self):
+        if self.smart_enabled:
+            self._set_smart(False)
         value = "S" if self.swing_switch.get() else "N"
         self._send({"flap": value}, success_note=f"Swing {'on' if value == 'S' else 'off'}")
 
