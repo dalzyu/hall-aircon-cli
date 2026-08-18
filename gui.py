@@ -40,9 +40,7 @@ import customtkinter as ctk
 
 import hall_aircon_api as api
 
-POLL_SECONDS = 10
-HISTORY_EVERY = 6          # fetch history/inbox every 6th poll (~1 min)
-PROBE_DEADLINE = 40        # seconds to wait for a capability probe answer
+HISTORY_EVERY = 6          # fetch history/inbox every 6th poll (~6 min)
 DEFAULT_RATE = 0.0065      # SGD per minute fallback
 
 GREEN = "#2E7D32"
@@ -69,8 +67,8 @@ class App(ctk.CTk):
         self.tick = 0
         self.logged_in_email = None
         self.usage_cache, self.topup_cache, self.inbox_cache = [], [], []
-        self.probing = False
-        self.probe_deadline = 0.0
+        self._fan_supported = False
+        self._swing_supported = False
         self._ui_queue = queue.Queue()  # thread -> main-thread callback queue
 
         # smart (bang-bang) mode state
@@ -212,7 +210,10 @@ class App(ctk.CTk):
         self.smart_status = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color=AMBER, wraplength=380)
         self.smart_status.pack(pady=(0, 2))
         self.calib_status = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color="#7ec8ff", wraplength=380)
-        self.calib_status.pack(pady=(0, 4))
+        self.calib_status.pack(pady=(0, 2))
+        ctk.CTkLabel(tab, text="Keep this app running for Smart mode, calibration and auto-refresh "
+                              "to work (minimising the window is fine).",
+                     font=ctk.CTkFont(size=11), text_color="#757575", wraplength=380).pack(pady=(0, 4))
 
         self.power_btn = ctk.CTkButton(tab, width=280, height=84, corner_radius=16,
                                        font=ctk.CTkFont(size=26, weight="bold"),
@@ -434,7 +435,7 @@ class App(ctk.CTk):
         code = a.get("aircon_code") or "?"
 
         self._track_session(a)
-        self._update_capabilities(a)
+        self._update_feature_support(a)
 
         hall = (a.get("hall") or {}).get("hall_name", "")
         room = a.get("room_name") or a.get("aircon_code") or ""
@@ -669,7 +670,7 @@ class App(ctk.CTk):
 
     def _smart_tick(self, a):
         """Controller: act on the latest state, using the thermal model."""
-        if not (self.smart_enabled and self.model) or self.busy or self.probing:
+        if not (self.smart_enabled and self.model) or self.busy:
             return
         if a.get("current_temperature") is None or not a.get("comm_stat") or a.get("maintenance_mode"):
             return
@@ -735,6 +736,8 @@ class App(ctk.CTk):
             "calibration (fridge, computer, chargers, lights, etc.).\n\n"
             "3. If possible, all occupants of the room should stay in the "
             "room for the whole calibration.\n\n"
+            "4. Keep this app open for the whole calibration — closing it "
+            "stops the sampling.\n\n"
             "The process takes roughly 1–2 hours: it first watches the room "
             "warm up, then turns the aircon on and watches it cool down."
         )
@@ -895,103 +898,33 @@ class App(ctk.CTk):
                 config["thermal"] = self.model
                 api.save_config(config)
 
-    # -------------------------------------------------------------- capability probe
-    def _caps(self, code):
-        return (api.load_config().get("capabilities") or {}).get(code, {})
-
-    def _set_cap(self, code, key, value):
-        config = api.load_config()
-        caps = config.setdefault("capabilities", {})
-        caps.setdefault(code, {})[key] = value
-        api.save_config(config)
-
-    def _update_capabilities(self, a):
-        code = a.get("aircon_code")
-        if not code:
-            return
-        caps = self._caps(code)
-
-        # values reported by the unit → supported
-        if a.get("fanstep"):
-            caps["fan"] = True
-        if a.get("flap"):
-            caps["swing"] = True
-        if "fan" in caps and "swing" in caps:
-            self.probing = False
-            self._set_cap(code, "fan", caps["fan"])
-            self._set_cap(code, "swing", caps["swing"])
-
-        self._apply_cap_ui(code, caps)
-
-        # run a one-time probe for unknown capabilities while the unit is on
-        if (not self.probing and a.get("power") and a.get("comm_stat")
-                and ("fan" not in caps or "swing" not in caps)):
-            self.probing = True
-            self.probe_deadline = time.time() + PROBE_DEADLINE
-            body = {}
-            if "fan" not in caps:
-                body["fanstep"] = "A"
-            if "swing" not in caps:
-                body["flap"] = "N"
-            self.footer.configure(text="Checking which features your unit supports…")
-            token = api.get_token()
-
-            def ok(_r):
-                pass
-
-            def err(e):
-                self.probing = False
-                self.footer.configure(text=e)
-            self._run(lambda: api.api_request("POST", "v2/ac/control", token=token, body=body), on_ok=ok, on_err=err)
-
-        # deadline expired → mark still-null capabilities as unsupported,
-        # but only if the unit stayed on for the whole probe window
-        if self.probing and time.time() > self.probe_deadline:
-            self.probing = False
-            if a.get("power") and a.get("comm_stat"):
-                if "fan" not in caps:
-                    caps["fan"] = False
-                if "swing" not in caps:
-                    caps["swing"] = False
-                self._set_cap(code, "fan", caps["fan"])
-                self._set_cap(code, "swing", caps["swing"])
-                self._apply_cap_ui(code, caps)
-                self.footer.configure(text=f"Updated {datetime.now().strftime('%H:%M:%S')}")
-
-    def _apply_cap_ui(self, code, caps):
-        fan_known = "fan" in caps
-        swing_known = "swing" in caps
-
-        if fan_known and caps["fan"]:
+    # -------------------------------------------------------------- feature support
+    def _update_feature_support(self, a):
+        """Simple rule: if the unit reports fanstep/flap it supports them;
+        null means the hardware doesn't expose the feature."""
+        self._fan_supported = a.get("fanstep") is not None
+        self._swing_supported = a.get("flap") is not None
+        if self._fan_supported:
             self.fan_hint.configure(text="Auto, 1 = low … 5 = high")
             for btn in self.fan_btns.values():
                 btn.configure(state="normal")
-        elif fan_known and not caps["fan"]:
+        else:
             self.fan_hint.configure(text="Fan speed is not supported by this unit", text_color=AMBER)
             for btn in self.fan_btns.values():
                 btn.configure(state="disabled")
-        else:
-            self.fan_hint.configure(text="Checking fan speed support…")
-            for btn in self.fan_btns.values():
-                btn.configure(state="disabled")
-
-        if swing_known and caps["swing"]:
+        if self._swing_supported:
             self.swing_hint.configure(text="")
             self.swing_switch.configure(state="normal")
-        elif swing_known and not caps["swing"]:
-            self.swing_hint.configure(text="Swing is not supported by this unit", text_color=AMBER)
-            self.swing_switch.configure(state="disabled")
         else:
-            self.swing_hint.configure(text="Checking swing support…")
+            self.swing_hint.configure(text="Swing is not supported by this unit", text_color=AMBER)
             self.swing_switch.configure(state="disabled")
 
     def _set_controls_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"
         self.power_btn.configure(state=state)
-        caps = self._caps((self.state or {}).get("aircon", {}).get("aircon_code"))
-        for level, btn in self.fan_btns.items():
-            btn.configure(state=state if (enabled and caps.get("fan", False)) else "disabled")
-        if enabled and caps.get("swing", False):
+        for btn in self.fan_btns.values():
+            btn.configure(state=state if (enabled and self._fan_supported) else "disabled")
+        if enabled and self._swing_supported:
             self.swing_switch.configure(state="normal")
         else:
             self.swing_switch.configure(state="disabled")
@@ -1113,9 +1046,7 @@ class App(ctk.CTk):
         self.after(self._poll_interval_ms(), self._poll_tick)
 
     def _poll_interval_ms(self):
-        # capability probe: 10s; everything else: once per minute (rate-limit friendly)
-        if self.probing:
-            return 10000
+        # once per minute — rate-limit friendly
         return 60000
 
     def _poll_tick(self):

@@ -53,10 +53,13 @@ The GUI has three tabs:
 Student login: it opens the NTU sign-in page in your browser, you paste the
 redirect URL back, done.
 
-**Fan/swing auto-detection**: if the unit never reports `fanstep`/`flap`, the
-app probes the hardware once (while the unit is on) and then greys out the
-controls with a "not supported by this unit" label — some hall units don't
-have these features. The result is remembered per aircon unit.
+**Fan/swing support**: if the unit reports `fanstep`/`flap` in its state,
+the controls are enabled; if they stay `null`, the unit doesn't support them
+and the controls are greyed out with a "not supported by this unit" label.
+
+**Keep the app running**: Smart mode, calibration and auto-refresh only work
+while the app is open (minimising the window is fine) — it's a desktop client,
+not a background service.
 
 **Smart mode (save money)**: billing charges per minute the unit is *on*, so
 the app acts as a bang-bang thermostat — cool to 22 °C (internally), turn the
