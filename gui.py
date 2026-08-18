@@ -109,7 +109,11 @@ class App(ctk.CTk):
         """Run UI callbacks posted from worker threads (thread-safe)."""
         try:
             while True:
-                self._ui_queue.get_nowait()()
+                callback = self._ui_queue.get_nowait()
+                try:
+                    callback()
+                except Exception:  # noqa: BLE001 — one bad callback must not kill the drain
+                    pass
         except queue.Empty:
             pass
         self.after(100, self._drain_queue)
@@ -714,6 +718,36 @@ class App(ctk.CTk):
             return
         if self.busy:
             return
+        self._show_calibration_warning()
+
+    def _show_calibration_warning(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Before calibration")
+        win.transient(self)
+        win.grab_set()
+        win.geometry("460x360")
+        ctk.CTkLabel(win, text="⚠ Please check before starting",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(18, 10))
+        msg = (
+            "1. Your room should already be at steady state with the "
+            "aircon OFF — off for at least 4 hours before calibrating.\n\n"
+            "2. Keep every heat-generating source ON for the whole "
+            "calibration (fridge, computer, chargers, lights, etc.).\n\n"
+            "3. If possible, all occupants of the room should stay in the "
+            "room for the whole calibration.\n\n"
+            "The process takes roughly 1–2 hours: it first watches the room "
+            "warm up, then turns the aircon on and watches it cool down."
+        )
+        ctk.CTkLabel(win, text=msg, justify="left", wraplength=400,
+                     font=ctk.CTkFont(size=13)).pack(padx=22, pady=(0, 14))
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(pady=(0, 18))
+        ctk.CTkButton(btns, text="Cancel", width=120, fg_color="transparent", border_width=1,
+                      command=win.destroy).pack(side="left", padx=8)
+        ctk.CTkButton(btns, text="I'm ready — start", width=180,
+                      command=lambda: (win.destroy(), self._start_calibration())).pack(side="left", padx=8)
+
+    def _start_calibration(self):
         # phase A: watch the room warm up with the unit OFF
         self.calib = {"phase": "A", "samples": [], "started": time.time()}
         self._save_calib()
@@ -835,8 +869,10 @@ class App(ctk.CTk):
     def _refine_lag(self, usage_rows):
         """Measure command→gateway-timestamp lag from completed sessions and
         our logged command times."""
+        if not isinstance(usage_rows, list) or not usage_rows:
+            return
         cmd_log = api.load_config().get("cmd_log") or []
-        if not cmd_log or not usage_rows or not self.model:
+        if not cmd_log or not self.model:
             return
         row = usage_rows[0]
         try:
