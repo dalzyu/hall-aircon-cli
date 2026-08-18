@@ -59,11 +59,24 @@ controls with a "not supported by this unit" label — some hall units don't
 have these features. The result is remembered per aircon unit.
 
 **Smart mode (save money)**: billing charges per minute the unit is *on*, so
-the app can act as a bang-bang thermostat — cool to 22 °C (internally), turn
-the unit off, and only restart when the room reaches your target +1 °C (target
-is configurable 23–26 °C). You only pay for active cooling time, and shutdowns
-are aligned to whole-minute boundaries to avoid the billing round-up. Manual
-controls disable Smart mode automatically.
+the app acts as a bang-bang thermostat — cool to 22 °C (internally), turn the
+unit off, and only restart when the room reaches your target +1 °C (target
+configurable 23–26 °C, reaction margin 0.1–1.0 °C).
+
+Smart mode is **gated behind a one-time thermal calibration** (press
+*Calibrate*): the app first watches the room warm up with the unit off, then
+watches it cool with the unit on, fits a two-phase exponential thermal model,
+and unlocks Smart. After that the controller is **model-driven and sparse**:
+
+- normal polling is **once per minute** (rate-limit friendly; 10 s only during
+  the one-time capability probe);
+- when Smart is idle it **doesn't poll at all** — it wakes up only when the
+  model predicts the temperature is within your reaction margin of the next
+  switch, plus a 15-minute safety poll;
+- shutdowns are scheduled so the gateway timestamps them **just before a
+  whole-minute boundary**, since billing rounds *up* per minute;
+- the command→gateway lag is measured from real sessions and used to sharpen
+  that alignment; manual controls disable Smart automatically.
 
 To build the single-file executables yourself (on each target OS):
 

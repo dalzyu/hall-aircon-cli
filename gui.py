@@ -14,6 +14,7 @@ Features:
     fanstep/flap, the controls are greyed out and labelled unsupported
 """
 
+import math
 import queue
 import sys
 import threading
@@ -74,20 +75,29 @@ class App(ctk.CTk):
 
         # smart (bang-bang) mode state
         sc = api.load_config().get("smart") or {}
-        self.smart_enabled = bool(sc.get("enabled"))
+        self.model = api.load_config().get("thermal") or None
+        self.smart_enabled = bool(sc.get("enabled")) and self.model is not None
         self.smart_target = max(23, min(26, int(sc.get("target", 24))))
+        self.smart_margin = max(0.1, min(1.0, float(sc.get("margin", 0.2))))
         st = api.load_config().get("smart_stats") or {"date": "", "on_s": 0, "win_s": 0}
         self._smart_stats = st
         self._smart_last_ts = time.time()
         self._smart_last_save = time.time()
+        self._last_fetch_ts = 0.0          # last /me fetch (smart sparse polling)
+        self._pending_off_id = None        # scheduled minute-boundary shutdown
+        # thermal calibration state
+        self.calib = api.load_config().get("calib") or {"phase": None, "samples": [], "started": 0}
 
         self._build_login()
         self._build_main()
         self.smart_target_lbl.configure(text=f"{self.smart_target}°C")
+        self.margin_lbl.configure(text=f"{self.smart_margin:.1f}°C")
+        if self.calib.get("phase"):
+            self.calib_btn.configure(text="Cancel")
+            self.calib_status.configure(text="Calibration in progress — samples will resume with each poll.")
         if self.smart_enabled:
             self.smart_switch.select()
-            self.smart_status.configure(
-                text=f"Smart ON — cools to {self.smart_target - 1}°C, then off until {self.smart_target + 1}°C")
+        self._update_smart_label()
 
         self.show_login()
         if api.get_token():
@@ -179,8 +189,26 @@ class App(ctk.CTk):
         self.smart_plus = ctk.CTkButton(smart_frame, text="+", width=30, height=28,
                                         command=lambda: self._smart_target_delta(1))
         self.smart_plus.pack(side="left", padx=2)
+
+        margin_frame = ctk.CTkFrame(tab)
+        margin_frame.pack(pady=(0, 4))
+        ctk.CTkLabel(margin_frame, text="Reaction margin", font=ctk.CTkFont(size=12)).pack(side="left", padx=8)
+        self.margin_minus = ctk.CTkButton(margin_frame, text="−", width=28, height=24,
+                                          command=lambda: self._margin_delta(-0.1))
+        self.margin_minus.pack(side="left", padx=2)
+        self.margin_lbl = ctk.CTkLabel(margin_frame, text="0.2°C", font=ctk.CTkFont(size=13, weight="bold"), width=52)
+        self.margin_lbl.pack(side="left", padx=2)
+        self.margin_plus = ctk.CTkButton(margin_frame, text="+", width=28, height=24,
+                                         command=lambda: self._margin_delta(0.1))
+        self.margin_plus.pack(side="left", padx=2)
+        self.calib_btn = ctk.CTkButton(margin_frame, text="Calibrate", width=84, height=24,
+                                       command=self._toggle_calibration)
+        self.calib_btn.pack(side="left", padx=8)
+
         self.smart_status = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color=AMBER, wraplength=380)
-        self.smart_status.pack(pady=(0, 4))
+        self.smart_status.pack(pady=(0, 2))
+        self.calib_status = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color="#7ec8ff", wraplength=380)
+        self.calib_status.pack(pady=(0, 4))
 
         self.power_btn = ctk.CTkButton(tab, width=280, height=84, corner_radius=16,
                                        font=ctk.CTkFont(size=26, weight="bold"),
@@ -456,6 +484,7 @@ class App(ctk.CTk):
 
         self._update_session_label(a)
         self._smart_tick(a)
+        self._calibration_tick(a)
         self.footer.configure(text=f"Updated {datetime.now().strftime('%H:%M:%S')}")
         self._render_cached_lists()
 
@@ -504,19 +533,23 @@ class App(ctk.CTk):
         self._set_smart(bool(self.smart_switch.get()))
 
     def _set_smart(self, enabled: bool):
+        if enabled and self.model is None:
+            self.smart_switch.deselect()
+            self.calib_status.configure(text="Smart mode needs a thermal model first — press Calibrate.")
+            return
         self.smart_enabled = enabled
         config = api.load_config()
-        config["smart"] = {"enabled": enabled, "target": self.smart_target}
+        config["smart"] = {"enabled": enabled, "target": self.smart_target, "margin": self.smart_margin}
         api.save_config(config)
         if enabled:
             self.smart_switch.select()
             self._smart_stats_reset_if_needed()
-            self.smart_status.configure(
-                text=f"Smart ON — cools to {self.smart_target - 1}°C, then off until {self.smart_target + 1}°C")
+            self._last_fetch_ts = 0  # fetch on the next tick to anchor state
+            self._update_smart_label()
         else:
             self.smart_switch.deselect()
             self.smart_status.configure(text="Smart mode off")
-        self._update_smart_label()
+            self._update_smart_label()
 
     def _smart_target_delta(self, delta):
         # user-facing target range 23..26; smart cools to 22 internally
@@ -526,11 +559,20 @@ class App(ctk.CTk):
         self.smart_target = new
         self.smart_target_lbl.configure(text=f"{new}°C")
         config = api.load_config()
-        config["smart"] = {"enabled": self.smart_enabled, "target": new}
+        config["smart"] = {"enabled": self.smart_enabled, "target": new, "margin": self.smart_margin}
         api.save_config(config)
-        if self.smart_enabled:
-            self.smart_status.configure(
-                text=f"Smart ON — cools to {new - 1}°C, then off until {new + 1}°C")
+        self._update_smart_label()
+
+    def _margin_delta(self, delta):
+        new = round(max(0.1, min(1.0, self.smart_margin + delta)), 1)
+        if new == self.smart_margin:
+            return
+        self.smart_margin = new
+        self.margin_lbl.configure(text=f"{new:.1f}°C")
+        config = api.load_config()
+        config["smart"] = {"enabled": self.smart_enabled, "target": self.smart_target, "margin": new}
+        api.save_config(config)
+        self._update_smart_label()
 
     def _smart_stats_reset_if_needed(self):
         today = datetime.now().strftime("%Y-%m-%d")
@@ -550,41 +592,272 @@ class App(ctk.CTk):
             config["smart_stats"] = self._smart_stats
             api.save_config(config)
             self._smart_last_save = now
-        self._update_smart_label()
 
     def _update_smart_label(self):
+        if self.model:
+            m = self.model
+            summary = (f"model: T_amb {m.get('T_amb'):.1f} · τ_off {m.get('tau_off')/3600:.1f}h · "
+                       f"T_eq {m.get('T_eq'):.1f} · τ_on {m.get('tau_on')/3600:.1f}h · lag {m.get('lag'):.0f}s")
+        else:
+            summary = "no thermal model yet — press Calibrate to unlock Smart mode"
         on_s = int(self._smart_stats.get("on_s", 0))
         win_s = max(int(self._smart_stats.get("win_s", 0)), 1)
         duty = 100.0 * on_s / win_s
         saved = (win_s - on_s) / 60.0 * self._session_rate()
-        if self.smart_enabled and win_s >= 60:
-            self.smart_status.configure(
-                text=f"Smart: duty {duty:.0f}% · ≈ SGD {saved:.2f} saved since {self._smart_stats.get('date', '')}"
-                     f" — cools to {self.smart_target - 1}°C, restarts at {self.smart_target + 1}°C")
+        parts = [summary]
+        if self.smart_enabled:
+            parts.append(
+                f"Smart ON @{self.smart_target}°C (band {self.smart_target - 1}–{self.smart_target + 1}, "
+                f"margin {self.smart_margin:.1f}°C) — polls only near switches")
+            if win_s >= 60:
+                parts.append(f"duty {duty:.0f}% · ≈ SGD {saved:.2f} saved since {self._smart_stats.get('date', '')}")
+        self.smart_status.configure(text="\n".join(parts))
+
+    # -------------------------------------------------------------- thermal model
+    def _smart_schedule(self, a):
+        """Model-based prediction. Returns (kind, wait_seconds):
+        off_boundary (temp already below low), off_lead (predicted time until
+        low is reached), on (temp above high), on_lead (predicted until high),
+        or None when nothing to do."""
+        T = a.get("current_temperature")
+        m = self.model
+        if T is None or m is None or not a.get("comm_stat") or a.get("maintenance_mode"):
+            return None
+        low = self.smart_target - 1
+        high = self.smart_target + 1
+        tau_on = max(float(m.get("tau_on") or 3600), 300)
+        tau_off = max(float(m.get("tau_off") or 21600), 600)
+        T_eq = float(m.get("T_eq") or 24)
+        T_amb = float(m.get("T_amb") or 28)
+        if a.get("power"):
+            if T <= low:
+                return ("off_boundary", 0)
+            denom = T - T_eq
+            if denom <= 0.3:
+                return ("off_boundary", 0)
+            t_off = tau_on * math.log(denom / max(low - T_eq, 0.2))
+            lead = self.smart_margin * tau_on / denom
+            return ("off_lead", max(t_off - lead, 0.0))
+        else:
+            if T >= high:
+                return ("on", 0)
+            denom = T_amb - T
+            if denom <= 0.3:
+                return ("on", 0)
+            t_on = tau_off * math.log(denom / max(T_amb - high, 0.2))
+            lead = self.smart_margin * tau_off / denom
+            return ("on_lead", max(t_on - lead, 0.0))
+
+    def _smart_needs_poll(self):
+        """Sparse polling: only fetch /me when near a predicted switch or the
+        safety interval (15 min) has elapsed."""
+        now = time.time()
+        if now - self._last_fetch_ts >= 900:
+            return True
+        a = (self.state or {}).get("aircon") or {}
+        if not a:
+            return True
+        s = self._smart_schedule(a)
+        if s is None:
+            return False
+        kind, wait = s
+        return kind.endswith("lead") and wait <= 0
 
     def _smart_tick(self, a):
-        """Bang-bang controller: cycle power to keep the room in [target-1, target+1]."""
-        if not self.smart_enabled or self.busy or self.probing:
+        """Controller: act on the latest state, using the thermal model."""
+        if not (self.smart_enabled and self.model) or self.busy or self.probing:
             return
-        t = a.get("current_temperature")
-        if t is None or not a.get("comm_stat") or a.get("maintenance_mode"):
+        if a.get("current_temperature") is None or not a.get("comm_stat") or a.get("maintenance_mode"):
             return
         self._smart_stats_reset_if_needed()
         self._smart_stats_accumulate(bool(a.get("power")))
+        s = self._smart_schedule(a)
+        if s is None:
+            return
+        kind, _wait = s
+        if kind == "off_boundary":
+            self._schedule_off_at_boundary(a)
+        elif kind == "on":
+            self._send({"power": "1", "setpoint": "22"},
+                       success_note=f"Smart: warmed to {a.get('current_temperature')}°C, turning on (setpoint 22)")
 
-        low = self.smart_target - 1
-        high = self.smart_target + 1
+    def _schedule_off_at_boundary(self, a):
+        """Send the OFF so the gateway timestamps it just before a whole-minute
+        boundary: billing rounds UP, so ending at X:00 - 1s pays X minutes."""
+        code = a.get("aircon_code")
+        start = (api.load_config().get("session_start") or {}).get(code)
+        lag = float((self.model or {}).get("lag") or 6.0)
+        now = time.time()
+        if start is None:
+            self._send({"power": "0"}, success_note="Smart: cooled to target, turning off (no alignment)")
+            return
+        k = math.floor((now - start) / 60) + 1
+        t_send = start + k * 60 - lag - 1.0
+        if t_send <= now + 1.0:
+            t_send = start + (k + 1) * 60 - lag - 1.0
+        delay_ms = max(500, int((t_send - now) * 1000))
+        if self._pending_off_id is not None:
+            self.after_cancel(self._pending_off_id)
+        self._pending_off_id = self.after(delay_ms, self._send_smart_off)
+        self.calib_status.configure(
+            text=f"Smart: temp {a.get('current_temperature')}°C ≤ {self.smart_target - 1}°C — "
+                 f"turning off in {delay_ms/1000:.0f}s (minute-aligned)")
+
+    def _send_smart_off(self):
+        self._pending_off_id = None
+        self._send({"power": "0"}, success_note="Smart: off at minute boundary")
+
+    # -------------------------------------------------------------- thermal calibration
+    def _toggle_calibration(self):
+        if self.calib.get("phase"):
+            self._cancel_calibration()
+            return
+        if self.busy:
+            return
+        # phase A: watch the room warm up with the unit OFF
+        self.calib = {"phase": "A", "samples": [], "started": time.time()}
+        self._save_calib()
+        self.calib_btn.configure(text="Cancel")
+        self.calib_status.configure(
+            text="Calibration A: make sure the aircon is OFF. Watching the room warm up "
+                 "(1 sample/min, needs ~15 samples and ≥0.4°C rise)…")
+        a = (self.state or {}).get("aircon") or {}
         if a.get("power"):
-            if t <= low:
-                start = (api.load_config().get("session_start") or {}).get(a.get("aircon_code"))
-                if start is None or (time.time() - start) % 60 <= 2:
-                    # align the shutdown with a whole-minute boundary: billing
-                    # rounds UP, so ending at X:00 pays exactly X minutes
-                    self._send({"power": "0"}, success_note=f"Smart: cooled to {t}°C, turning off")
+            self._send({"power": "0"}, success_note="Calibration: unit turned off for drift measurement")
+
+    def _cancel_calibration(self):
+        self.calib = {"phase": None, "samples": [], "started": 0}
+        self._save_calib()
+        self.calib_btn.configure(text="Calibrate")
+        self.calib_status.configure(text="Calibration cancelled")
+
+    def _save_calib(self):
+        config = api.load_config()
+        config["calib"] = self.calib
+        api.save_config(config)
+
+    def _calibration_tick(self, a):
+        if not self.calib.get("phase"):
+            return
+        T = a.get("current_temperature")
+        if T is None:
+            return
+        samples = self.calib.setdefault("samples", [])
+        now = time.time()
+        if not samples or samples[-1][1] != T or now - samples[-1][0] >= 60:
+            samples.append([now, T])
+            self._save_calib()
+        phase = self.calib["phase"]
+        temps = [s[1] for s in samples]
+        spread = max(temps) - min(temps)
+        mins = len(samples)
+        if phase == "A":
+            self.calib_status.configure(
+                text=f"Calibration A: {mins} samples, temp {T}°C (spread {spread:.0f}°C / need 0.4)…")
+            if mins >= 15 and spread >= 0.4:
+                self._finish_calib_a(temps, samples)
+        elif phase == "B":
+            self.calib_status.configure(
+                text=f"Calibration B: {mins} samples, temp {T}°C (spread {spread:.0f}°C / need 0.4)…")
+            if mins >= 15 and spread >= 0.4:
+                self._finish_calib_b(temps, samples)
+
+    def _finish_calib_a(self, temps, samples):
+        T_amb, tau_off = self._fit_curve(samples, rising=True)
+        if tau_off is None or T_amb is None:
+            self.calib_status.configure(text="Calibration A data too flat — keep waiting, or restart later.")
+            return
+        self._calib_a = {"T_amb": T_amb, "tau_off": tau_off}
+        # phase B: unit ON at setpoint 22, watch it cool
+        self.calib = {"phase": "B", "samples": [], "started": time.time()}
+        self._save_calib()
+        self.calib_status.configure(
+            text=f"Calibration B: drift fit done (T_amb {T_amb:.1f}°C, τ_off {tau_off/3600:.1f}h). "
+                 "Turning the aircon ON at 22°C and watching it cool…")
+        self._send({"power": "1", "setpoint": "22"}, success_note="Calibration: cooling phase started")
+
+    def _finish_calib_b(self, temps, samples):
+        T_eq, tau_on = self._fit_curve(samples, rising=False)
+        if T_eq is None or tau_on is None:
+            self.calib_status.configure(text="Calibration B data too flat — keep waiting, or restart later.")
+            return
+        model = {
+            "T_amb": self._calib_a["T_amb"], "tau_off": self._calib_a["tau_off"],
+            "T_eq": T_eq, "tau_on": tau_on,
+            "lag": float((self.model or {}).get("lag") or 6.0),
+            "fitted_at": time.strftime("%Y-%m-%d %H:%M"),
+        }
+        config = api.load_config()
+        config["thermal"] = model
+        api.save_config(config)
+        self.model = model
+        self.calib = {"phase": None, "samples": [], "started": 0}
+        self._save_calib()
+        self.calib_btn.configure(text="Calibrate")
+        self.calib_status.configure(
+            text=f"Calibration complete! T_amb {model['T_amb']:.1f}°C, τ_off {model['tau_off']/3600:.1f}h, "
+                 f"T_eq {model['T_eq']:.1f}°C, τ_on {model['tau_on']/3600:.1f}h. Smart mode unlocked.")
+        self._update_smart_label()
+
+    def _fit_curve(self, samples, rising=True):
+        """Fit T(t) = A - B·e^(-t/τ) (rising) or T(t) = A + B·e^(-t/τ) (falling)
+        to 1°C-quantised samples. A small brute-force grid search in the
+        original domain is far more robust to quantisation than log-space
+        regression. Returns (asymptote, tau_seconds)."""
+        if len(samples) < 8:
+            return None, None
+        t0 = samples[0][0]
+        xs = [(s[0] - t0) / 3600.0 for s in samples]
+        temps = [float(s[1]) for s in samples]
+        T0 = temps[0]
+        lo, hi = min(temps), max(temps)
+        if hi - lo < 1.0:
+            return None, None  # nothing happened yet
+        if rising:
+            a_candidates = [hi + 0.2 + 0.1 * i for i in range(14)]  # hi+0.2 .. hi+1.5
         else:
-            if t >= high:
-                self._send({"power": "1", "setpoint": "22"},
-                           success_note=f"Smart: warmed to {t}°C, turning on (setpoint 22)")
+            a_candidates = [lo - 0.2 - 0.1 * i for i in range(14)]  # lo-0.2 .. lo-1.5
+        tau_candidates = [0.25 * (1.55 ** i) for i in range(22)]    # 0.25h .. ~44h
+        best = None
+        for A in a_candidates:
+            for tau in tau_candidates:
+                sse = 0.0
+                for x, y in zip(xs, temps):
+                    pred = (A - (A - T0) * math.exp(-x / tau)) if rising \
+                        else (A + (T0 - A) * math.exp(-x / tau))
+                    sse += (pred - y) ** 2
+                if best is None or sse < best[0]:
+                    best = (sse, A, tau)
+        if best is None:
+            return None, None
+        return best[1], best[2] * 3600
+
+    def _refine_lag(self, usage_rows):
+        """Measure command→gateway-timestamp lag from completed sessions and
+        our logged command times."""
+        cmd_log = api.load_config().get("cmd_log") or []
+        if not cmd_log or not usage_rows or not self.model:
+            return
+        row = usage_rows[0]
+        try:
+            start_ts = datetime.fromisoformat(row["starttime"]).timestamp()
+            end_ts = datetime.fromisoformat(row["endtime"]).timestamp()
+        except (KeyError, ValueError):
+            return
+        lags = []
+        for cmd in cmd_log:
+            body = cmd.get("body") or {}
+            if body.get("power") == "1" and abs(cmd["t"] - start_ts) < 120:
+                lags.append(start_ts - cmd["t"])
+            if body.get("power") == "0" and abs(cmd["t"] - end_ts) < 120:
+                lags.append(end_ts - cmd["t"])
+        if lags:
+            new_lag = sum(lags) / len(lags)
+            if 0.5 <= new_lag <= 30:
+                self.model["lag"] = new_lag
+                config = api.load_config()
+                config["thermal"] = self.model
+                api.save_config(config)
 
     # -------------------------------------------------------------- capability probe
     def _caps(self, code):
@@ -751,6 +1024,12 @@ class App(ctk.CTk):
         self.busy = True
         self.footer.configure(text="Sending…")
         token = api.get_token()
+        # log command time for lag calibration (aligns minute-boundary shutdowns)
+        config = api.load_config()
+        cmd_log = config.get("cmd_log") or []
+        cmd_log.append({"t": time.time(), "body": body})
+        config["cmd_log"] = cmd_log[-30:]
+        api.save_config(config)
 
         def ok(_r):
             self.busy = False
@@ -798,14 +1077,25 @@ class App(ctk.CTk):
         self.after(self._poll_interval_ms(), self._poll_tick)
 
     def _poll_interval_ms(self):
-        # poll twice as fast while a capability probe is running
-        return 5000 if self.probing else POLL_SECONDS * 1000
+        # capability probe: 10s; everything else: once per minute (rate-limit friendly)
+        if self.probing:
+            return 10000
+        return 60000
 
     def _poll_tick(self):
         self.tick += 1
         if self.main_frame.winfo_ismapped() and api.get_token():
-            self.refresh()
-            if self.tick % HISTORY_EVERY == 0:
+            fetch = False
+            if self.calib.get("phase"):
+                fetch = True                                    # calibration always samples
+            elif self.smart_enabled and self.model:
+                fetch = self._smart_needs_poll()                # sparse, model-driven
+            else:
+                fetch = True                                    # normal mode: 1/min
+            if fetch:
+                self._last_fetch_ts = time.time()
+                self.refresh()
+            if self.tick % HISTORY_EVERY == 0:                  # every ~6 min
                 self._refresh_lists()
         self._schedule_poll()
 
@@ -823,6 +1113,7 @@ class App(ctk.CTk):
         self.usage_cache = usage.get("data") or []
         self.topup_cache = topups.get("data") or []
         self.inbox_cache = inbox.get("data") or []
+        self._refine_lag(self.usage_cache)
         self._render_cached_lists()
 
 
