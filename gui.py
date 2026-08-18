@@ -77,6 +77,9 @@ class App(ctk.CTk):
         self.smart_enabled = bool(sc.get("enabled")) and self.model is not None
         self.smart_target = max(23, min(26, int(sc.get("target", 24))))
         self.smart_margin = max(0.1, min(1.0, float(sc.get("margin", 0.2))))
+        # asymmetric band support: off_at/on_at override the target±1 defaults
+        self.smart_off_at = float(sc.get("off_at") or (self.smart_target - 1))
+        self.smart_on_at = float(sc.get("on_at") or (self.smart_target + 1))
         st = api.load_config().get("smart_stats") or {"date": "", "on_s": 0, "win_s": 0}
         self._smart_stats = st
         self._smart_last_ts = time.time()
@@ -544,7 +547,10 @@ class App(ctk.CTk):
             return
         self.smart_enabled = enabled
         config = api.load_config()
-        config["smart"] = {"enabled": enabled, "target": self.smart_target, "margin": self.smart_margin}
+        config["smart"] = {
+            "enabled": enabled, "target": self.smart_target, "margin": self.smart_margin,
+            "off_at": self.smart_off_at, "on_at": self.smart_on_at,
+        }
         api.save_config(config)
         if enabled:
             self.smart_switch.select()
@@ -557,14 +563,22 @@ class App(ctk.CTk):
             self._update_smart_label()
 
     def _smart_target_delta(self, delta):
-        # user-facing target range 23..26; smart cools to 22 internally
+        # user-facing target range 23..26; smart cools to 22 internally.
+        # Moving the target shifts the whole (possibly asymmetric) band.
         new = max(23, min(26, self.smart_target + delta))
         if new == self.smart_target:
             return
+        off_gap = self.smart_target - self.smart_off_at
+        on_gap = self.smart_on_at - self.smart_target
         self.smart_target = new
+        self.smart_off_at = new - off_gap
+        self.smart_on_at = new + on_gap
         self.smart_target_lbl.configure(text=f"{new}°C")
         config = api.load_config()
-        config["smart"] = {"enabled": self.smart_enabled, "target": new, "margin": self.smart_margin}
+        config["smart"] = {
+            "enabled": self.smart_enabled, "target": new, "margin": self.smart_margin,
+            "off_at": self.smart_off_at, "on_at": self.smart_on_at,
+        }
         api.save_config(config)
         self._update_smart_label()
 
@@ -575,7 +589,10 @@ class App(ctk.CTk):
         self.smart_margin = new
         self.margin_lbl.configure(text=f"{new:.1f}°C")
         config = api.load_config()
-        config["smart"] = {"enabled": self.smart_enabled, "target": self.smart_target, "margin": new}
+        config["smart"] = {
+            "enabled": self.smart_enabled, "target": self.smart_target, "margin": new,
+            "off_at": self.smart_off_at, "on_at": self.smart_on_at,
+        }
         api.save_config(config)
         self._update_smart_label()
 
@@ -612,7 +629,7 @@ class App(ctk.CTk):
         parts = [summary]
         if self.smart_enabled:
             parts.append(
-                f"Smart ON @{self.smart_target}°C (band {self.smart_target - 1}–{self.smart_target + 1}, "
+                f"Smart ON @{self.smart_target}°C (band {self.smart_off_at:g}–{self.smart_on_at:g}, "
                 f"margin {self.smart_margin:.1f}°C) — polls only near switches")
             if win_s >= 60:
                 parts.append(f"duty {duty:.0f}% · ≈ SGD {saved:.2f} saved since {self._smart_stats.get('date', '')}")
@@ -628,8 +645,8 @@ class App(ctk.CTk):
         m = self.model
         if T is None or m is None or not a.get("comm_stat") or a.get("maintenance_mode"):
             return None
-        low = self.smart_target - 1
-        high = self.smart_target + 1
+        low = self.smart_off_at
+        high = self.smart_on_at
         tau_on = max(float(m.get("tau_on") or 3600), 300)
         tau_off = max(float(m.get("tau_off") or 21600), 600)
         T_eq = float(m.get("T_eq") or 24)
@@ -705,7 +722,7 @@ class App(ctk.CTk):
             self.after_cancel(self._pending_off_id)
         self._pending_off_id = self.after(delay_ms, self._send_smart_off)
         self.calib_status.configure(
-            text=f"Smart: temp {a.get('current_temperature')}°C ≤ {self.smart_target - 1}°C — "
+            text=f"Smart: temp {a.get('current_temperature')}°C ≤ {self.smart_off_at:g}°C — "
                  f"turning off in {delay_ms/1000:.0f}s (minute-aligned)")
 
     def _send_smart_off(self):
@@ -719,7 +736,43 @@ class App(ctk.CTk):
             return
         if self.busy:
             return
-        self._show_calibration_warning()
+        if self.smart_enabled and self.model:
+            # in-flight calibration: refit from Smart's real cycles
+            self._show_flight_warning()
+        else:
+            self._show_calibration_warning()
+
+    def _show_flight_warning(self):
+        win = ctk.CTkToplevel(self)
+        win.title("In-flight calibration")
+        win.transient(self)
+        win.grab_set()
+        win.geometry("460x330")
+        ctk.CTkLabel(win, text="Calibrate while Smart runs?",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(18, 10))
+        msg = (
+            "The app will watch Smart mode's real cycles — collecting "
+            "warm-up samples while the unit is off and cooling samples while "
+            "it runs — and continuously refit the thermal model.\n\n"
+            "Keep every heat source and fan in a FIXED state for the whole "
+            "test, and keep this app open.\n\n"
+            "No commands are sent by calibration itself; Smart keeps running."
+        )
+        ctk.CTkLabel(win, text=msg, justify="left", wraplength=400,
+                     font=ctk.CTkFont(size=13)).pack(padx=22, pady=(0, 14))
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(pady=(0, 18))
+        ctk.CTkButton(btns, text="Cancel", width=120, fg_color="transparent", border_width=1,
+                      command=win.destroy).pack(side="left", padx=8)
+        ctk.CTkButton(btns, text="Start in-flight calibration", width=200,
+                      command=lambda: (win.destroy(), self._start_flight_calibration())).pack(side="left", padx=8)
+
+    def _start_flight_calibration(self):
+        self.calib = {"phase": "F", "drift": [], "cool": [], "started": time.time()}
+        self._save_calib()
+        self.calib_btn.configure(text="Cancel")
+        self.calib_status.configure(
+            text="In-flight calibration started — collecting warm-up & cooling samples from Smart's cycles…")
 
     def _show_calibration_warning(self):
         win = ctk.CTkToplevel(self)
@@ -763,7 +816,7 @@ class App(ctk.CTk):
             self._send({"power": "0"}, success_note="Calibration: unit turned off for drift measurement")
 
     def _cancel_calibration(self):
-        self.calib = {"phase": None, "samples": [], "started": 0}
+        self.calib = {"phase": None, "samples": [], "drift": [], "cool": [], "started": 0}
         self._save_calib()
         self.calib_btn.configure(text="Calibrate")
         self.calib_status.configure(text="Calibration cancelled")
@@ -774,17 +827,30 @@ class App(ctk.CTk):
         api.save_config(config)
 
     def _calibration_tick(self, a):
-        if not self.calib.get("phase"):
+        phase = self.calib.get("phase")
+        if not phase:
             return
         T = a.get("current_temperature")
         if T is None:
             return
-        samples = self.calib.setdefault("samples", [])
         now = time.time()
+        if phase == "F":
+            # in-flight: tag each sample with the unit's power state
+            bucket = "drift" if not a.get("power") else "cool"
+            lst = self.calib.setdefault(bucket, [])
+            if not lst or lst[-1][1] != T or now - lst[-1][0] >= 60:
+                lst.append([now, T])
+                self._save_calib()
+                self._flight_fit(bucket)
+            self.calib_status.configure(
+                text=f"In-flight cal: {len(self.calib.get('drift', []))} warm-up, "
+                     f"{len(self.calib.get('cool', []))} cooling samples · "
+                     f"temp {T}°C ({'unit on' if a.get('power') else 'unit off'})")
+            return
+        samples = self.calib.setdefault("samples", [])
         if not samples or samples[-1][1] != T or now - samples[-1][0] >= 60:
             samples.append([now, T])
             self._save_calib()
-        phase = self.calib["phase"]
         temps = [s[1] for s in samples]
         spread = max(temps) - min(temps)
         mins = len(samples)
@@ -798,6 +864,32 @@ class App(ctk.CTk):
                 text=f"Calibration B: {mins} samples, temp {T}°C (spread {spread:.0f}°C / need 0.4)…")
             if mins >= 15 and spread >= 0.4:
                 self._finish_calib_b(temps, samples)
+
+    def _flight_fit(self, bucket):
+        """Continuously refit one model side from in-flight samples."""
+        lst = self.calib.get(bucket) or []
+        if len(lst) < 10:
+            return
+        temps = [s[1] for s in lst]
+        if max(temps) - min(temps) < 1.0:
+            return
+        if bucket == "drift":
+            T_amb, tau_off = self._fit_curve(lst, rising=True)
+            if T_amb is None or tau_off is None:
+                return
+            self.model["T_amb"], self.model["tau_off"] = T_amb, tau_off
+        else:
+            T_eq, tau_on = self._fit_curve(lst, rising=False)
+            if T_eq is None or tau_on is None:
+                return
+            self.model["T_eq"], self.model["tau_on"] = T_eq, tau_on
+        config = api.load_config()
+        config["thermal"] = self.model
+        api.save_config(config)
+        # keep a sliding window so the tail still pins the asymptote
+        self.calib[bucket] = lst[-30:]
+        self._save_calib()
+        self._update_smart_label()
 
     def _finish_calib_a(self, temps, samples):
         T_amb, tau_off = self._fit_curve(samples, rising=True)
@@ -998,6 +1090,14 @@ class App(ctk.CTk):
         cmd_log = config.get("cmd_log") or []
         cmd_log.append({"t": time.time(), "body": body})
         config["cmd_log"] = cmd_log[-30:]
+        # anchor the session start when turning ON so boundary maths use the
+        # gateway's clock (+lag), not the next poll time
+        if body.get("power") == "1":
+            code = ((self.state or {}).get("aircon") or {}).get("aircon_code")
+            if code:
+                sessions = config.setdefault("session_start", {})
+                sessions[code] = time.time() + float((self.model or {}).get("lag") or 6.0)
+                config["session_start"] = sessions
         api.save_config(config)
 
         def ok(_r):
