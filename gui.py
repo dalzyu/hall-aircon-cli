@@ -61,7 +61,7 @@ class App(ctk.CTk):
         self.geometry("440x760")
         self.minsize(410, 660)
 
-        self.state = None               # latest /me data
+        self.account_state = None               # latest /me data
         self.temp_min, self.temp_max = 16, 30
         self.config_loaded = False
         self.busy = False
@@ -387,7 +387,7 @@ class App(ctk.CTk):
         )
 
     def _reset_to_login(self):
-        self.state = None
+        self.account_state = None
         self.show_login()
 
     # -------------------------------------------------------------- data
@@ -436,7 +436,7 @@ class App(ctk.CTk):
     # -------------------------------------------------------------- render
     def _render(self, me):
         data = me.get("data") or {}
-        self.state = data
+        self.account_state = data
         a = data.get("aircon") or {}
         code = a.get("aircon_code") or "?"
 
@@ -682,7 +682,7 @@ class App(ctk.CTk):
         now = time.time()
         if now - self._last_fetch_ts >= 900:
             return True
-        a = (self.state or {}).get("aircon") or {}
+        a = (self.account_state or {}).get("aircon") or {}
         if not a:
             return True
         s = self._smart_schedule(a)
@@ -735,7 +735,7 @@ class App(ctk.CTk):
         self._pending_off_id = None
         if not self.smart_enabled or not api.get_token():
             return
-        a = (self.state or {}).get("aircon") or {}
+        a = (self.account_state or {}).get("aircon") or {}
         if not a.get("comm_stat") or a.get("maintenance_mode") or not a.get("power"):
             return
         self._send({"power": "0"}, success_note="Smart: off at minute boundary")
@@ -822,7 +822,7 @@ class App(ctk.CTk):
         self.calib_status.configure(
             text="Calibration A: make sure the aircon is OFF. Watching the room warm up "
                  "(1 sample/min, needs ~15 samples and ≥0.4°C rise)…")
-        a = (self.state or {}).get("aircon") or {}
+        a = (self.account_state or {}).get("aircon") or {}
         if a.get("power"):
             self._send({"power": "0"}, success_note="Calibration: unit turned off for drift measurement")
 
@@ -1104,7 +1104,7 @@ class App(ctk.CTk):
         # anchor the session start when turning ON so boundary maths use the
         # gateway's clock (+lag), not the next poll time
         if body.get("power") == "1":
-            code = ((self.state or {}).get("aircon") or {}).get("aircon_code")
+            code = ((self.account_state or {}).get("aircon") or {}).get("aircon_code")
             if code:
                 sessions = config.setdefault("session_start", {})
                 sessions[code] = time.time() + float((self.model or {}).get("lag") or 6.0)
@@ -1126,14 +1126,14 @@ class App(ctk.CTk):
     def toggle_power(self):
         if self.smart_enabled:
             self._set_smart(False)
-        a = (self.state or {}).get("aircon") or {}
+        a = (self.account_state or {}).get("aircon") or {}
         target = "0" if a.get("power") else "1"
         self._send({"power": target})
 
     def step_temp(self, delta):
         if self.smart_enabled:
             self._set_smart(False)
-        a = (self.state or {}).get("aircon") or {}
+        a = (self.account_state or {}).get("aircon") or {}
         cur = a.get("setpoint")
         if cur is None:
             return
@@ -1195,7 +1195,60 @@ class App(ctk.CTk):
         self._render_cached_lists()
 
 
+def smoke_test():
+    """Run the real startup/event-loop path offline, including in frozen builds."""
+    import tempfile
+    from pathlib import Path
+
+    original_path, original_token, original_request = api.CONFIG_PATH, api.get_token, api.api_request
+
+    def reject_network(*args, **kwargs):
+        raise AssertionError("Startup smoke test must stay offline")
+
+    with tempfile.TemporaryDirectory() as directory:
+        api.CONFIG_PATH = str(Path(directory) / "config.json")
+        api.get_token = lambda: None
+        api.api_request = reject_network
+        app = None
+        try:
+            app = App()
+            app.withdraw()
+            errors = []
+            app.report_callback_exception = lambda *error: errors.append(error)
+
+            def check_startup():
+                assert app.login_frame.winfo_exists()
+                assert __version__ in app.title()
+                assert callable(app.state), "Application data must not shadow Tk.state()"
+                app.state()
+                # Receiving account data must also leave the Tk method intact.
+                app.account_state = {"aircon": {}}
+                app.state()
+
+            app.after(150, check_startup)
+            app.after(300, app.quit)
+            app.mainloop()
+            if errors:
+                raise errors[0][1]
+        finally:
+            if app is not None:
+                app.destroy()
+            api.CONFIG_PATH, api.get_token, api.api_request = original_path, original_token, original_request
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test-report":
+        import json
+        from pathlib import Path
+
+        report = Path(sys.argv[2])
+        try:
+            smoke_test()
+        except Exception as error:
+            report.write_text(json.dumps({"ok": False, "error": str(error)}), encoding="utf-8")
+            raise SystemExit(1)
+        report.write_text(json.dumps({"ok": True, "version": __version__}), encoding="utf-8")
+        return
     App().mainloop()
 
 

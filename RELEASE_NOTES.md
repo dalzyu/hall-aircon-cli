@@ -1,6 +1,6 @@
-## Hall Aircon v1.5.0
+## Hall Aircon v1.5.1
 
-Public release of the unofficial Hall Aircon CLI and desktop app.
+Fixes the Windows desktop startup crash in v1.5.0.
 
 ### Downloads
 
@@ -21,17 +21,12 @@ The binaries are unsigned and the macOS binary is not notarized.
 
 ### Changes
 
-- Added installable Python packaging and `--version`.
-- Added standalone CLI binaries alongside the desktop app on all three platforms.
-- Added offline regression tests and GUI construction checks.
-- Build all platforms before publishing a complete release of standalone binaries.
-- Fixed missing password prompts for non-SSO CLI accounts.
-- Report API rejections, malformed responses, and timeouts as errors.
-- Write configuration atomically, preserving the previous file if a write fails.
-- Fixed GUI error callbacks losing their exception messages.
-- Cancel scheduled Smart shutdowns when Smart is disabled or the user logs out.
-- Fixed elapsed-time handling for model-driven Smart polling.
-- Updated installation, authentication, and thermostat documentation.
+- Fixed `TypeError: 'NoneType' object is not callable` at desktop startup.
+  The account-data field no longer shadows Tk's `state()` window method.
+- Startup checks now enter the real GUI event loop and check the window method
+  both before and after account data is populated.
+- Every release build runs an offline startup check inside the actual packaged
+  GUI executable before publishing. Python and application dependencies remain bundled.
 
 ### Experimental features and validation limits
 
@@ -43,7 +38,7 @@ provide equivalent compressor-cycle protection. Keep automated operation supervi
 Closing the application stops its automation but does not necessarily turn off
 the physical unit. Use the official app to confirm its state when needed.
 
-Validation uses simulated API responses, GUI construction checks, and packaged
-CLI smoke checks. Real NTU SSO, current service compatibility, physical-unit
+Validation uses simulated API responses, source GUI event-loop checks, and packaged
+CLI and GUI startup checks. Real NTU SSO, current service compatibility, physical-unit
 behavior, and unsigned-binary first-run behavior on every OS were not validated
 for this release.

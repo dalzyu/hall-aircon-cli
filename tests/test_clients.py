@@ -136,13 +136,13 @@ class GuiTests(unittest.TestCase):
         app._send.assert_not_called()
 
     def test_offline_shutdown_does_not_control_unit(self):
-        app = Mock(smart_enabled=True, state={"aircon": {"comm_stat": False, "power": True}})
+        app = Mock(smart_enabled=True, account_state={"aircon": {"comm_stat": False, "power": True}})
         with patch.object(api, "get_token", return_value="test-token"):
             gui.App._send_smart_off(app)
         app._send.assert_not_called()
 
     def test_sparse_poll_uses_elapsed_prediction_time(self):
-        app = Mock(_last_fetch_ts=100, state={"aircon": {"power": True}})
+        app = Mock(_last_fetch_ts=100, account_state={"aircon": {"power": True}})
         app._smart_schedule.return_value = ("off_lead", 120)
         with patch.object(gui.time, "time", return_value=221):
             self.assertTrue(gui.App._smart_needs_poll(app))

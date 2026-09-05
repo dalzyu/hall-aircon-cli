@@ -153,9 +153,10 @@ matching `v*` tag. All three platform builds must pass before the workflow
 publishes the standalone executables. Manual workflow
 runs produce downloadable build artifacts without publishing a release.
 
-Tests use simulated responses and offline GUI construction. NTU SSO, live
+Tests use simulated responses and offline GUI event-loop checks, including startup
+inside the packaged executable. NTU SSO, live
 service compatibility, physical hardware, and platform first-run approval
-flows were not validated for v1.5.0. See [release notes](RELEASE_NOTES.md).
+flows were not validated for v1.5.1. See [release notes](RELEASE_NOTES.md).
 
 ## Contributing and security
 
