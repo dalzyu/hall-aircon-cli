@@ -4,16 +4,19 @@ Public release of the unofficial Hall Aircon CLI and desktop app.
 
 ### Downloads
 
-Each platform ZIP includes the desktop app, a standalone `hall-aircon` CLI,
-the README, release notes, and MIT license:
+Download the executable for your platform and preferred interface. Each is a
+single file with Python and its application dependencies bundled inside;
+no Python installation, pip install, or ZIP extraction is needed.
 
-- `HallAircon-windows-x64.zip`: Windows x64.
-- `HallAircon-macos-arm64.zip`: Apple Silicon, macOS 14 or newer.
-- `HallAircon-linux-x64.zip`: Linux x64, glibc 2.35 or newer (Ubuntu 22.04+).
+| Platform | Desktop app | CLI |
+| --- | --- | --- |
+| Windows x64 | `HallAircon-windows-x64.exe` | `hall-aircon-windows-x64.exe` |
+| Apple Silicon, macOS 14+ | `HallAircon-macos-arm64` | `hall-aircon-macos-arm64` |
+| Linux x64, Ubuntu 22.04+ / glibc 2.35+ | `HallAircon-linux-x64` | `hall-aircon-linux-x64` |
 
-Python wheel and source distributions are also provided. Python 3.10+ is
-required only when running from source or installing the wheel.
-`SHA256SUMS.txt` contains checksums for all release downloads.
+On Windows, double-click the desktop executable. On macOS/Linux, run
+`chmod +x FILENAME`, then `./FILENAME`. The GUI needs a graphical desktop.
+The executables still rely on their platform's standard operating-system libraries.
 The binaries are unsigned and the macOS binary is not notarized.
 
 ### Changes
@@ -21,7 +24,7 @@ The binaries are unsigned and the macOS binary is not notarized.
 - Added installable Python packaging and `--version`.
 - Added standalone CLI binaries alongside the desktop app on all three platforms.
 - Added offline regression tests and GUI construction checks.
-- Build all platforms before publishing a complete release, with checksums.
+- Build all platforms before publishing a complete release of standalone binaries.
 - Fixed missing password prompts for non-SSO CLI accounts.
 - Report API rejections, malformed responses, and timeouts as errors.
 - Write configuration atomically, preserving the previous file if a write fails.

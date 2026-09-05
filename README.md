@@ -8,25 +8,23 @@ your aircon. Not affiliated with Daikin or NTU.
 
 ## Download
 
-Get a ZIP from the [latest release](https://github.com/dalzyu/hall-aircon-cli/releases/latest).
-Each contains both a desktop app and a CLI; no Python installation is needed.
+Get an executable from the [latest release](https://github.com/dalzyu/hall-aircon-cli/releases/latest).
+Each is a single file containing Python and its application dependencies.
+No Python installation, pip install, or archive extraction is needed.
 
-| Platform | Download | Desktop app | CLI |
-| --- | --- | --- | --- |
-| Windows x64 | `HallAircon-windows-x64.zip` | `HallAircon.exe` | `hall-aircon.exe` |
-| macOS 14+ Apple Silicon | `HallAircon-macos-arm64.zip` | `HallAircon` | `hall-aircon` |
-| Linux x64 (Ubuntu 22.04+ / glibc 2.35+) | `HallAircon-linux-x64.zip` | `HallAircon` | `hall-aircon` |
+| Platform | Desktop app | CLI |
+| --- | --- | --- |
+| Windows x64 | `HallAircon-windows-x64.exe` | `hall-aircon-windows-x64.exe` |
+| macOS 14+ Apple Silicon | `HallAircon-macos-arm64` | `hall-aircon-macos-arm64` |
+| Linux x64 (Ubuntu 22.04+ / glibc 2.35+) | `HallAircon-linux-x64` | `hall-aircon-linux-x64` |
 
-Extract the ZIP first. On Windows, double-click the desktop app. On macOS/Linux,
-run `chmod +x HallAircon hall-aircon`, then `./HallAircon` from a terminal.
+On Windows, double-click the desktop app. On macOS/Linux,
+run `chmod +x FILENAME`, then `./FILENAME` from a terminal.
 Linux needs a graphical desktop for the GUI. Intel Mac users can run from source.
+Standard operating-system libraries are still required on each platform.
 These are unsigned binaries; macOS builds are not notarized. Your operating
 system may require explicit approval to open the downloaded app. Verify the
-download source and checksum before approving it; do not disable security tools.
-
-`SHA256SUMS.txt` is published with every release. Compare your ZIP's hash using
-`Get-FileHash FILE.zip -Algorithm SHA256` (PowerShell), `shasum -a 256 FILE.zip`
-(macOS), or `sha256sum FILE.zip` (Linux).
+download source before approving it; do not disable security tools.
 
 ## Install from source
 
@@ -45,14 +43,14 @@ python -m pip install '.[gui]'
 hall-aircon-gui
 ```
 
-For CLI only, use `python -m pip install .`. A downloaded release wheel can
-also be installed with `python -m pip install PATH_TO_WHEEL.whl`.
+For CLI only, use `python -m pip install .`.
 From a checkout, `python hall_aircon.py --help` runs without installation.
 
 ## Command-line usage
 
 The examples use the installed `hall-aircon` command. For downloaded binaries,
-use `./hall-aircon` on macOS/Linux or `.\hall-aircon.exe` in PowerShell.
+use the downloaded filename, such as `./hall-aircon-linux-x64` on Linux or
+`.\hall-aircon-windows-x64.exe` in PowerShell.
 
 ```bash
 hall-aircon --version
@@ -119,7 +117,7 @@ enabling Smart. Smart checks near predicted switches and at least every
 estimated gateway lag. Savings and timing are estimates, not guarantees.
 Manual controls disable Smart and cancel its pending shutdown.
 
-An independent, simpler thermostat is available after source/wheel installation:
+An independent, simpler thermostat is available after source installation:
 
 ```bash
 hall-aircon-thermostat --dry-run --poll 60
@@ -152,7 +150,7 @@ On headless Linux, use `xvfb-run -a python scripts/smoke_gui.py`.
 Source tests run on Python 3.10, 3.12, and 3.14. Release binaries use Python 3.12.
 Update `hall_aircon_version.py` and `RELEASE_NOTES.md`, validate CI, then push a
 matching `v*` tag. All three platform builds must pass before the workflow
-publishes the archives, Python distributions, and checksums. Manual workflow
+publishes the standalone executables. Manual workflow
 runs produce downloadable build artifacts without publishing a release.
 
 Tests use simulated responses and offline GUI construction. NTU SSO, live

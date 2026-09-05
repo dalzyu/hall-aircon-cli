@@ -1,10 +1,10 @@
-"""Build portable CLI + GUI archives on their native operating system."""
+"""Build standalone CLI + GUI executables on their native operating system."""
 
 import argparse
 from pathlib import Path
 import subprocess
+import shutil
 import sys
-import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -14,8 +14,8 @@ def main():
     parser.add_argument("--platform", required=True,
                         choices=["windows-x64", "macos-arm64", "linux-x64"])
     args = parser.parse_args()
-    release = ROOT / "release"
-    release.mkdir(exist_ok=True)
+    release = ROOT / "release" / "binaries"
+    release.mkdir(parents=True, exist_ok=True)
     common = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
               "--onefile", "--add-data", "LICENSE:."]
     for name, script, options in (
@@ -27,12 +27,10 @@ def main():
     cli = ROOT / "dist" / f"hall-aircon{suffix}"
     subprocess.run([str(cli), "--version"], check=True)
     subprocess.run([str(cli), "--help"], check=True, stdout=subprocess.DEVNULL)
-    archive = release / f"HallAircon-{args.platform}.zip"
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
-        for path in (cli, ROOT / "dist" / f"HallAircon{suffix}",
-                     ROOT / "LICENSE", ROOT / "README.md", ROOT / "RELEASE_NOTES.md"):
-            output.write(path, path.name)
-    print(f"Built {archive}")
+    for name in ("hall-aircon", "HallAircon"):
+        destination = release / f"{name}-{args.platform}{suffix}"
+        shutil.copy2(ROOT / "dist" / f"{name}{suffix}", destination)
+        print(f"Built {destination}")
 
 
 if __name__ == "__main__":
