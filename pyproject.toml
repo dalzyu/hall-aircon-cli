@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hall-aircon-cli"
+dynamic = ["version"]
+description = "Unofficial CLI and desktop client for Hall Aircon"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["customtkinter==5.2.2"]
+
+[project.scripts]
+hall-aircon = "hall_aircon:main"
+hall-aircon-thermostat = "bangbang:main"
+
+[project.gui-scripts]
+hall-aircon-gui = "gui:main"
+
+[project.urls]
+Repository = "https://github.com/dalzyu/hall-aircon-cli"
+Issues = "https://github.com/dalzyu/hall-aircon-cli/issues"
+
+[tool.setuptools]
+py-modules = ["hall_aircon", "hall_aircon_api", "hall_aircon_version", "gui", "bangbang"]
+
+[tool.setuptools.dynamic]
+version = {attr = "hall_aircon_version.__version__"}

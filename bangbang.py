@@ -154,7 +154,7 @@ class Controller:
 
 
 def main():
-    p = argparse.ArgumentParser(description="Bang-bang (thermostat) controller for Hall Aircon")
+    p = argparse.ArgumentParser(description="Experimental thermostat controller for Hall Aircon")
     p.add_argument("--low", type=int, default=23, help="turn OFF when room reaches this (default 23)")
     p.add_argument("--high", type=int, default=25, help="turn ON when room reaches this (default 25)")
     p.add_argument("--setpoint", type=int, default=22, help="cooling setpoint while ON (default 22, server floor)")
@@ -170,6 +170,12 @@ def main():
 
     if args.low >= args.high:
         p.error("--low must be below --high")
+    if not 16 <= args.setpoint <= 30:
+        p.error("--setpoint must be between 16 and 30")
+    if args.poll <= 0 or args.min_on <= 0 or args.min_off <= 0:
+        p.error("--poll, --min-on and --min-off must be positive")
+    if args.rate < 0:
+        p.error("--rate must be non-negative")
     Controller(args).run()
 
 

@@ -1,13 +1,10 @@
-name: build-binaries
-
+name: release-builds
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-
 permissions:
-  contents: write
-
+  contents: read
 jobs:
   build:
     strategy:
@@ -15,39 +12,57 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            name: HallAircon
-            artifact: HallAircon.exe
-          - os: macos-latest
-            name: HallAircon-macos-arm64
-            artifact: HallAircon-macos-arm64
-          - os: ubuntu-latest
-            name: HallAircon-linux
-            artifact: HallAircon-linux
+            platform: windows-x64
+          - os: macos-14
+            platform: macos-arm64
+          - os: ubuntu-22.04
+            platform: linux-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install customtkinter pyinstaller
-
-      - name: Build single-file binary
-        run: >
-          pyinstaller --onefile --windowed --collect-all customtkinter
-          --name ${{ matrix.name }} gui.py
-
-      - name: Attach to release
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Verify release version
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        run: python -c "import os; from hall_aircon_version import __version__; assert os.environ['GITHUB_REF_NAME'] == 'v' + __version__"
+      - name: Offline regression tests
+        run: python -m unittest discover -s tests -v
+      - name: GUI smoke check
+        if: runner.os != 'Linux'
+        run: python scripts/smoke_gui.py
+      - name: GUI smoke check (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python scripts/smoke_gui.py
+      - name: Build and smoke-test binaries
+        run: python scripts/build_release.py --platform ${{ matrix.platform }}
+      - name: Build Python distributions
+        if: runner.os == 'Linux'
+        run: python -m build --outdir release
+      - uses: actions/upload-artifact@v4
         with:
-          files: dist/${{ matrix.artifact }}
-
-      - name: Upload build artifact (manual runs)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+          name: ${{ matrix.platform }}
+          path: release/*
+          if-no-files-found: error
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          path: release
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: release
+        run: sha256sum HallAircon-*.zip *.whl *.tar.gz > SHA256SUMS.txt
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release/* --verify-tag --title "Hall Aircon $RELEASE_TAG" --notes-file RELEASE_NOTES.md

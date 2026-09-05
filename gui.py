@@ -39,6 +39,7 @@ if sys.platform == "win32":
 import customtkinter as ctk
 
 import hall_aircon_api as api
+from hall_aircon_version import __version__
 
 HISTORY_EVERY = 6          # fetch history/inbox every 6th poll (~6 min)
 DEFAULT_RATE = 0.0065      # SGD per minute fallback
@@ -56,7 +57,7 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
-        self.title("Hall Aircon")
+        self.title(f"Hall Aircon {__version__}")
         self.geometry("440x760")
         self.minsize(410, 660)
 
@@ -183,7 +184,7 @@ class App(ctk.CTk):
         # smart (bang-bang) mode: cool to target-1, restart at target+1
         smart_frame = ctk.CTkFrame(tab)
         smart_frame.pack(pady=(0, 8))
-        self.smart_switch = ctk.CTkSwitch(smart_frame, text="Smart (save money)", font=ctk.CTkFont(size=14),
+        self.smart_switch = ctk.CTkSwitch(smart_frame, text="Smart (experimental)", font=ctk.CTkFont(size=14),
                                           command=self._toggle_smart)
         self.smart_switch.pack(side="left", padx=10)
         self.smart_minus = ctk.CTkButton(smart_frame, text="−", width=30, height=28,
@@ -307,10 +308,10 @@ class App(ctk.CTk):
             try:
                 result = fn()
             except api.ApiError as e:
-                self._ui_queue.put(lambda: on_err(str(e)) if on_err else None)
+                self._ui_queue.put(lambda message=str(e): on_err(message) if on_err else None)
                 return
             except Exception as e:  # noqa: BLE001
-                self._ui_queue.put(lambda: on_err(str(e)) if on_err else None)
+                self._ui_queue.put(lambda message=str(e): on_err(message) if on_err else None)
                 return
             self._ui_queue.put(lambda: on_ok(result) if on_ok else None)
         threading.Thread(target=worker, daemon=True).start()
@@ -377,6 +378,8 @@ class App(ctk.CTk):
         self.load_main()
 
     def do_logout(self):
+        self._set_smart(False)
+        self.calib = {"phase": None}
         self._run(
             lambda: api.api_request("POST", "auth/logout", token=api.get_token()),
             on_ok=lambda _r: (api.clear_token(), self._reset_to_login()),
@@ -546,6 +549,9 @@ class App(ctk.CTk):
             self.calib_status.configure(text="Smart mode needs a thermal model first — press Calibrate.")
             return
         self.smart_enabled = enabled
+        if not enabled and self._pending_off_id is not None:
+            self.after_cancel(self._pending_off_id)
+            self._pending_off_id = None
         config = api.load_config()
         config["smart"] = {
             "enabled": enabled, "target": self.smart_target, "margin": self.smart_margin,
@@ -683,7 +689,7 @@ class App(ctk.CTk):
         if s is None:
             return False
         kind, wait = s
-        return kind.endswith("lead") and wait <= 0
+        return kind.endswith("lead") and wait <= now - self._last_fetch_ts
 
     def _smart_tick(self, a):
         """Controller: act on the latest state, using the thermal model."""
@@ -727,6 +733,11 @@ class App(ctk.CTk):
 
     def _send_smart_off(self):
         self._pending_off_id = None
+        if not self.smart_enabled or not api.get_token():
+            return
+        a = (self.state or {}).get("aircon") or {}
+        if not a.get("comm_stat") or a.get("maintenance_mode") or not a.get("power"):
+            return
         self._send({"power": "0"}, success_note="Smart: off at minute boundary")
 
     # -------------------------------------------------------------- thermal calibration
@@ -1184,5 +1195,9 @@ class App(ctk.CTk):
         self._render_cached_lists()
 
 
-if __name__ == "__main__":
+def main():
     App().mainloop()
+
+
+if __name__ == "__main__":
+    main()

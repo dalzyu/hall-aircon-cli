@@ -2,7 +2,7 @@
 """hall_aircon.py — unofficial CLI for the Hall Aircon service.
 
 Uses the same public HTTPS API the official mobile app uses, with your own
-account credentials. No third-party dependencies (Python 3.8+, stdlib only).
+account credentials. No third-party dependencies (Python 3.10+, stdlib only).
 """
 
 import argparse
@@ -11,6 +11,7 @@ import sys
 import time
 
 import hall_aircon_api as api
+from hall_aircon_version import __version__
 
 
 def die(message: str) -> None:
@@ -43,11 +44,12 @@ def cmd_login(args) -> None:
     try:
         api.login(
             email, password=args.password, fcm_token=args.fcm_token or "",
-            get_redirect=None if args.password else _redirect_handler,
+            get_redirect=_redirect_handler,
+            get_password=lambda: getpass.getpass("Password: "),
         )
     except api.ApiError as e:
         die(str(e))
-    print(f"logged in — token stored in {api.CONFIG_PATH} (mode 0600)")
+    print(f"logged in — token stored in {api.CONFIG_PATH}")
 
 
 def cmd_status(args) -> None:
@@ -132,7 +134,7 @@ def _list_request(args, path: str, what: str, columns) -> None:
         die(str(e))
     if (r.get("meta") or {}).get("status", 200) != 200:
         die(f"{what} failed: {r.get('meta', {}).get('message')}")
-    meta = r["meta"]
+    meta = r.get("meta") or {}
     print(f"{meta.get('rowCount', 0)} record(s)")
     _print_rows(r.get("data") or [], columns)
 
@@ -175,9 +177,10 @@ def cmd_logout(args) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="hall_aircon.py",
+        prog="hall-aircon",
         description="Unofficial CLI for the Hall Aircon service (uses the same public API as the official app).",
     )
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--token", help="session token (overrides config file and HALL_AIRCON_TOKEN)")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -186,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("off", help="turn the aircon off")
 
     sp = sub.add_parser("temp", help="set temperature setpoint (16-30 C)")
-    sp.add_argument("temp")
+    sp.add_argument("temp", type=int)
 
     sp = sub.add_parser("fan", help="set fan speed")
     sp.add_argument("level", help="A (auto), L, LM, M, MH, H")
@@ -220,7 +223,12 @@ def main() -> None:
         "fan": cmd_fan, "swing": cmd_swing, "usage": cmd_usage, "topups": cmd_topups,
         "inbox": cmd_inbox, "login": cmd_login, "logout": cmd_logout,
     }
-    handlers[args.command](args)
+    try:
+        handlers[args.command](args)
+    except (OSError, EOFError) as e:
+        die(str(e))
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 if __name__ == "__main__":

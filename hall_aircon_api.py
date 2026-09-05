@@ -7,6 +7,7 @@ account. Standard library only.
 
 import json
 import os
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -44,17 +45,32 @@ def api_request(method: str, path: str, token: str | None = None, body: dict | N
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             raw = resp.read().decode("utf-8")
-            return json.loads(raw) if raw.strip() else {}
+            result = json.loads(raw) if raw.strip() else {}
+            if not isinstance(result, dict):
+                raise ApiError(0, "invalid API response: expected an object")
+            meta = result.get("meta") or {}
+            if not isinstance(meta, dict):
+                raise ApiError(0, "invalid API response: expected metadata object")
+            status = meta.get("status", 200)
+            if status != 200:
+                raise ApiError(status, meta.get("message") or "API request failed")
+            return result
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", errors="replace")
         message = raw.strip() or e.reason
         try:
-            message = (json.loads(raw).get("meta") or {}).get("message") or message
+            error = json.loads(raw)
+            if isinstance(error, dict) and isinstance(error.get("meta"), dict):
+                message = error["meta"].get("message") or message
         except json.JSONDecodeError:
             pass
         raise ApiError(e.code, message) from None
     except urllib.error.URLError as e:
         raise ApiError(0, f"network error: {e.reason}") from None
+    except (TimeoutError, OSError) as e:
+        raise ApiError(0, f"network error: {e}") from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise ApiError(0, "invalid API response: expected UTF-8 JSON") from None
 
 
 # --------------------------------------------------------------------------
@@ -64,19 +80,23 @@ def api_request(method: str, path: str, token: str | None = None, body: dict | N
 def load_config() -> dict:
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            config = json.load(f)
+            return config if isinstance(config, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
 
 
 def save_config(config: dict) -> None:
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
+    # mkstemp creates a private file on POSIX; replace only after a full write.
+    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(CONFIG_PATH), suffix=".tmp")
     try:
-        os.chmod(CONFIG_PATH, 0o600)
-    except OSError:
-        pass  # e.g. Windows
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        os.replace(temporary, CONFIG_PATH)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def get_token() -> str | None:
@@ -90,7 +110,7 @@ def clear_token() -> None:
 
 
 def login(email: str, password: str | None = None, fcm_token: str = "",
-          get_redirect=None) -> str:
+          get_redirect=None, get_password=None) -> str:
     """Log in and store the session token.
 
     For student accounts, get_redirect(login_url) must return the full final
@@ -115,6 +135,8 @@ def login(email: str, password: str | None = None, fcm_token: str = "",
             body={"hash": final_url[len(SAML_PREFIX):], "fcm_token": fcm_token},
         )
     else:
+        if not password and get_password is not None:
+            password = get_password()
         if not password:
             raise ApiError(0, "password is required for this account")
         r = api_request(
