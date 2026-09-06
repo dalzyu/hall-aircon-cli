@@ -98,6 +98,9 @@ login. Logout cannot remove a token from your shell environment; unset it there.
 - **History:** usage sessions and top-ups.
 - **Inbox:** service notifications.
 
+Control and History scroll to keep every section reachable in shorter windows.
+Log out and the status footer remain outside the scrolling area.
+
 Fan and swing controls are disabled when the unit reports no corresponding
 state. API acceptance alone does not establish hardware support. Normal GUI
 polling is once per minute; commands trigger a follow-up refresh.
@@ -156,7 +159,7 @@ runs produce downloadable build artifacts without publishing a release.
 Tests use simulated responses and offline GUI event-loop checks, including startup
 inside the packaged executable. NTU SSO, live
 service compatibility, physical hardware, and platform first-run approval
-flows were not validated for v1.5.1. See [release notes](RELEASE_NOTES.md).
+flows were not validated for v1.5.2. See [release notes](RELEASE_NOTES.md).
 
 ## Contributing and security
 

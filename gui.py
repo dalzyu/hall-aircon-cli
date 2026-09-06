@@ -59,7 +59,7 @@ class App(ctk.CTk):
 
         self.title(f"Hall Aircon {__version__}")
         self.geometry("440x760")
-        self.minsize(410, 660)
+        self.minsize(440, 420)
 
         self.account_state = None               # latest /me data
         self.temp_min, self.temp_max = 16, 30
@@ -122,8 +122,9 @@ class App(ctk.CTk):
 
     # ------------------------------------------------------------------ UI
     def _build_login(self):
-        self.login_frame = ctk.CTkFrame(self)
-        self.login_frame.place(relx=0.5, rely=0.5, anchor="center")
+        self.login_scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.login_frame = ctk.CTkFrame(self.login_scroll)
+        self.login_frame.pack(pady=20)
 
         ctk.CTkLabel(self.login_frame, text="Hall Aircon", font=ctk.CTkFont(size=28, weight="bold")).pack(pady=(28, 4))
         ctk.CTkLabel(self.login_frame, text="Sign in with your account", font=ctk.CTkFont(size=14)).pack(pady=(0, 20))
@@ -152,28 +153,34 @@ class App(ctk.CTk):
 
     def _build_main(self):
         self.main_frame = ctk.CTkFrame(self)
+        self.main_frame.grid_columnconfigure(0, weight=1)
+        self.main_frame.grid_rowconfigure(3, weight=1)
 
-        self.header = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=20, weight="bold"))
-        self.header.pack(pady=(20, 0))
-        self.sub_header = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=13), text_color="#9e9e9e")
-        self.sub_header.pack(pady=(0, 4))
+        self.header = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=20, weight="bold"), wraplength=390)
+        self.header.grid(row=0, column=0, pady=(12, 0))
+        self.sub_header = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=13), text_color="#9e9e9e", wraplength=390)
+        self.sub_header.grid(row=1, column=0, pady=(0, 4))
         self.warn_label = ctk.CTkLabel(self.main_frame, text="", text_color=AMBER, font=ctk.CTkFont(size=13), wraplength=390)
-        self.warn_label.pack(pady=(0, 2))
+        self.warn_label.grid(row=2, column=0, pady=(0, 2))
 
         self.tabs = ctk.CTkTabview(self.main_frame)
-        self.tabs.pack(fill="both", expand=True, padx=16, pady=(4, 4))
+        self.tabs.grid(row=3, column=0, sticky="nsew", padx=12, pady=4)
         self.tabs.add("Control")
         self.tabs.add("History")
         self.tabs.add("Inbox")
-        self._build_control_tab(self.tabs.tab("Control"))
-        self._build_history_tab(self.tabs.tab("History"))
+        self.control_scroll = ctk.CTkScrollableFrame(self.tabs.tab("Control"), fg_color="transparent")
+        self.control_scroll.pack(fill="both", expand=True)
+        self._build_control_tab(self.control_scroll)
+        self.history_scroll = ctk.CTkScrollableFrame(self.tabs.tab("History"), fg_color="transparent")
+        self.history_scroll.pack(fill="both", expand=True)
+        self._build_history_tab(self.history_scroll)
         self._build_inbox_tab(self.tabs.tab("Inbox"))
 
-        self.footer = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=12), text_color="#9e9e9e")
-        self.footer.pack(side="bottom", pady=(0, 4))
+        self.footer = ctk.CTkLabel(self.main_frame, text="", font=ctk.CTkFont(size=12), text_color="#9e9e9e", wraplength=390)
+        self.footer.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 4))
         self.logout_btn = ctk.CTkButton(self.main_frame, text="Log out", width=100, fg_color="transparent",
                                         border_width=1, command=self.do_logout)
-        self.logout_btn.pack(side="bottom", pady=(0, 12))
+        self.logout_btn.grid(row=4, column=0, pady=(4, 4))
 
     def _build_control_tab(self, tab):
         self.balance_label = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=15))
@@ -267,12 +274,14 @@ class App(ctk.CTk):
         ctk.CTkButton(head, text="Refresh", width=80, height=26, command=self._refresh_lists).pack(side="right")
         self.usage_summary = ctk.CTkLabel(tab, text="", font=ctk.CTkFont(size=12), text_color="#9e9e9e")
         self.usage_summary.pack(pady=(0, 4))
-        self.usage_box = ctk.CTkScrollableFrame(tab, height=180)
+        self.usage_box = ctk.CTkFrame(tab, height=1, fg_color="transparent")
         self.usage_box.pack(fill="x", padx=10)
 
         ctk.CTkLabel(tab, text="Top-ups", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(12, 4))
-        self.topup_box = ctk.CTkScrollableFrame(tab, height=120)
+        self.topup_box = ctk.CTkFrame(tab, height=1, fg_color="transparent")
         self.topup_box.pack(fill="x", padx=10, pady=(0, 10))
+        self._render_usage([])
+        self._render_topups([])
 
     def _build_inbox_tab(self, tab):
         head = ctk.CTkFrame(tab, fg_color="transparent")
@@ -285,7 +294,7 @@ class App(ctk.CTk):
     # -------------------------------------------------------------- screens
     def show_login(self):
         self.main_frame.pack_forget()
-        self.login_frame.place(relx=0.5, rely=0.5, anchor="center")
+        self.login_scroll.pack(fill="both", expand=True)
         self.show_email_step()
 
     def show_email_step(self):
@@ -296,7 +305,7 @@ class App(ctk.CTk):
         self.login_error.configure(text="")
 
     def show_main(self):
-        self.login_frame.place_forget()
+        self.login_scroll.pack_forget()
         self.main_frame.pack(fill="both", expand=True)
 
     def _set_login_error(self, message: str):
@@ -1224,6 +1233,8 @@ def smoke_test():
                 # Receiving account data must also leave the Tk method intact.
                 app.account_state = {"aircon": {}}
                 app.state()
+                from gui_layout_check import check_layout
+                check_layout(app)
 
             app.after(150, check_startup)
             app.after(300, app.quit)

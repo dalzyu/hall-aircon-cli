@@ -1,6 +1,6 @@
-## Hall Aircon v1.5.1
+## Hall Aircon v1.5.2
 
-Fixes the Windows desktop startup crash in v1.5.0.
+Fixes desktop controls being clipped at shorter window heights.
 
 ### Downloads
 
@@ -21,12 +21,15 @@ The binaries are unsigned and the macOS binary is not notarized.
 
 ### Changes
 
-- Fixed `TypeError: 'NoneType' object is not callable` at desktop startup.
-  The account-data field no longer shadows Tk's `state()` window method.
-- Startup checks now enter the real GUI event loop and check the window method
-  both before and after account data is populated.
-- Every release build runs an offline startup check inside the actual packaged
-  GUI executable before publishing. Python and application dependencies remain bundled.
+- Control and History content now scroll when the window is too short.
+- Log out and the status footer retain their own space outside the scrolling tabs.
+- The minimum window height is now 420 logical pixels; long header and status
+  text wraps within the supported minimum width.
+- History uses one scrollbar for both usage and top-ups, avoiding nested scrolling.
+- Sign-in also scrolls so the SSO completion button remains reachable in short windows.
+- Packaged GUI checks verify content reachability and footer visibility at four
+  window heights and two UI scaling levels, as well as the startup regression.
+- Python and application dependencies remain bundled in each executable.
 
 ### Experimental features and validation limits
 

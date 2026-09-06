@@ -27,7 +27,7 @@ Repository = "https://github.com/dalzyu/hall-aircon-cli"
 Issues = "https://github.com/dalzyu/hall-aircon-cli/issues"
 
 [tool.setuptools]
-py-modules = ["hall_aircon", "hall_aircon_api", "hall_aircon_version", "gui", "bangbang"]
+py-modules = ["hall_aircon", "hall_aircon_api", "hall_aircon_version", "gui", "gui_layout_check", "bangbang"]
 
 [tool.setuptools.dynamic]
 version = {attr = "hall_aircon_version.__version__"}
